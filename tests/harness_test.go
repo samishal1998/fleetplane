@@ -67,7 +67,11 @@ type Harness struct {
 	Clock     *stepClock
 	Hooks     operations.Hooks
 	EngineCfg operations.Config
+
+	ownerID string
 }
+
+func (h *Harness) OwnerID() string { return h.ownerID }
 
 func newHarness(t *testing.T, fakeOpts fake.Options) *Harness {
 	t.Helper()
@@ -104,6 +108,7 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 	}
 	inst, _ := providers.Instance("fake-local")
 	h.St = st
+	h.ownerID = ownerID
 	h.Providers = providers
 	h.Fake = inst.(*fake.Fake)
 	h.Engine = operations.New(st, providers, h.Clock, log, h.EngineCfg, h.Hooks)

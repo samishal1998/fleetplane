@@ -121,6 +121,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		log.Warn("NO API TOKENS CONFIGURED — the API is open; use auth.tokens in production (07 §2)")
 	}
 	health := app.NewHealthTracker(providers, clock, app.HealthConfig{})
+	reconciler.EnableDiscovery(reconcile.DiscoveryConfig{
+		Interval:       cfg.Discovery.Interval.Std(),
+		OrphanGrace:    cfg.Discovery.OrphanGrace.Std(),
+		GhostPolicy:    cfg.Discovery.GhostPolicy,
+		AdoptUnlabeled: cfg.Discovery.AdoptUnlabeled,
+	}, providers.Names, func(instance string) bool {
+		for _, ph := range health.Snapshot() {
+			if ph.Instance == instance {
+				return ph.State == "healthy" || ph.State == "unknown"
+			}
+		}
+		return true
+	})
 
 	a := &App{
 		cfg: cfg, log: log.With("owner_id", ownerID), db: db,
@@ -193,6 +206,7 @@ func (a *App) Serve(ctx context.Context) error {
 	defer stopEngine()
 	go a.engine.Run(engineCtx)
 	go a.reconciler.Run(engineCtx)
+	go a.reconciler.RunDiscovery(engineCtx)
 	go a.sweepLoop(engineCtx)
 	go a.health.Run(engineCtx)
 

@@ -23,6 +23,7 @@ type Config struct {
 	Engine    Engine              `yaml:"engine"`
 	Reconcile Reconcile           `yaml:"reconcile"`
 	Acquire   Acquire             `yaml:"acquire"`
+	Discovery Discovery           `yaml:"discovery"`
 	Auth      Auth                `yaml:"auth"`
 }
 
@@ -63,6 +64,16 @@ type Reconcile struct {
 type Acquire struct {
 	// PendingTimeout expires never-satisfied acquisitions (plan R6).
 	PendingTimeout Duration `yaml:"pendingTimeout"`
+}
+
+// Discovery tunes the provider discovery sweep (ADR-017).
+type Discovery struct {
+	Interval    Duration `yaml:"interval"`
+	OrphanGrace Duration `yaml:"orphanGrace"`
+	// GhostPolicy: delete (default) | surface.
+	GhostPolicy string `yaml:"ghostPolicy"`
+	// AdoptUnlabeled: off (default) | observed.
+	AdoptUnlabeled string `yaml:"adoptUnlabeled"`
 }
 
 // Engine tunes the operation engine (ADR-014 defaults apply when zero).

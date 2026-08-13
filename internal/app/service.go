@@ -161,6 +161,25 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Ou
 	return out, nil
 }
 
+// deleteGates are the shared deletion safeguards (invariants 3 and 5).
+func deleteGates(ctx context.Context, tx storage.TxStore, res *storage.Resource) error {
+	if res.DeletedAt != nil {
+		return fmt.Errorf("%w: resource already deleted", storage.ErrNotFound)
+	}
+	if res.Ownership != storage.OwnershipManaged {
+		return invalid("resource %s has ownership %q; only managed resources are deletable in v1 (invariant 5)", res.ID, res.Ownership)
+	}
+	if res.DeleteProtected {
+		return fmt.Errorf("%w: resource %s is protected", storage.ErrConflict, res.ID)
+	}
+	if n, err := tx.Leases().CountActive(ctx, res.ID); err != nil {
+		return err
+	} else if n > 0 {
+		return fmt.Errorf("%w: resource %s has %d active lease(s) (invariant 3)", storage.ErrConflict, res.ID, n)
+	}
+	return nil
+}
+
 func (s *Service) GetResource(ctx context.Context, id string) (*storage.Resource, error) {
 	return s.st.Resources().Get(ctx, storage.ResourceID(id))
 }
@@ -172,6 +191,9 @@ func (s *Service) ListResources(ctx context.Context, f storage.ResourceFilter) (
 type DeleteResourceCmd struct {
 	ID    string
 	Actor string
+	// DryRun runs every deletion gate and reports the plan without
+	// mutating anything ("plan before mutate", 01 §6).
+	DryRun bool
 
 	IdemKey     string
 	IdemScope   string
@@ -186,6 +208,23 @@ func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCmd) (Ou
 	resID := storage.ResourceID(cmd.ID)
 	opID := storage.OperationID(ids.New(ids.Operation))
 	nowMs := s.clock.Now().UnixMilli()
+
+	if cmd.DryRun {
+		var out Outcome
+		err := s.st.View(ctx, func(tx storage.TxStore) error {
+			res, err := tx.Resources().Get(ctx, resID)
+			if err != nil {
+				return err
+			}
+			if err := deleteGates(ctx, tx, res); err != nil {
+				return err
+			}
+			status, body := cmd.BuildResponse(res)
+			out = Outcome{Status: status, Body: body}
+			return nil
+		})
+		return out, err
+	}
 
 	var out Outcome
 	err := s.st.Tx(ctx, func(tx storage.TxStore) error {
@@ -215,19 +254,8 @@ func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCmd) (Ou
 		}
 		// Deletion gates (07 §5, invariants 3/5) — checked in the same tx
 		// that journals the delete, so they cannot race.
-		if res.DeletedAt != nil {
-			return fmt.Errorf("%w: resource already deleted", storage.ErrNotFound)
-		}
-		if res.Ownership != storage.OwnershipManaged {
-			return invalid("resource %s has ownership %q; only managed resources are deletable in v1 (invariant 5)", res.ID, res.Ownership)
-		}
-		if res.DeleteProtected {
-			return fmt.Errorf("%w: resource %s is protected", storage.ErrConflict, res.ID)
-		}
-		if n, err := tx.Leases().CountActive(ctx, resID); err != nil {
+		if err := deleteGates(ctx, tx, res); err != nil {
 			return err
-		} else if n > 0 {
-			return fmt.Errorf("%w: resource %s has %d active lease(s) (invariant 3)", storage.ErrConflict, res.ID, n)
 		}
 
 		if res.ExternalID == nil {

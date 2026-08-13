@@ -88,6 +88,9 @@ type Reconciler struct {
 	mu    sync.Mutex
 	dirty map[storage.PoolID]bool
 	wake  chan struct{}
+
+	disc          *discovery
+	sweepInstance string // instance under sweep (sweeps are serialized)
 }
 
 func New(st storage.Store, providers provision.Providers, engine Kicker, classes ClassResolver,

@@ -113,11 +113,16 @@ func (s *Server) deleteResource(w http.ResponseWriter, r *http.Request) {
 	actor := principalOf(r).Name
 	id := r.PathValue("id")
 	sum := sha256.Sum256([]byte("DELETE /v1/resources/" + id))
+	dryRun := r.URL.Query().Get("dryRun") == "true"
 	out, err := s.app.DeleteResource(r.Context(), app.DeleteResourceCmd{
-		ID: id, Actor: actor,
+		ID: id, Actor: actor, DryRun: dryRun,
 		IdemKey: r.Header.Get("Idempotency-Key"), IdemScope: "DELETE /v1/resources|" + actor,
 		RequestHash: hex.EncodeToString(sum[:]),
 		BuildResponse: func(res *storage.Resource) (int, json.RawMessage) {
+			if dryRun {
+				b, _ := json.Marshal(map[string]any{"id": string(res.ID), "wouldDelete": true, "dryRun": true})
+				return http.StatusOK, b
+			}
 			b, _ := json.Marshal(map[string]string{"id": string(res.ID), "status": "deleting"})
 			return http.StatusAccepted, b
 		},

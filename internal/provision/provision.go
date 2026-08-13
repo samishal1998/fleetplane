@@ -57,12 +57,16 @@ func Prepare(ctx context.Context, providers Providers, ownerID string, cs Create
 		name = string(resID)
 	}
 
+	labels := provider.IdentityLabels(ownerID, string(resID), string(opID))
+	if cs.Class != "" {
+		labels[provider.LabelClass] = cs.Class
+	}
 	plan, err := driver.Plan(ctx, provider.PlanRequest{
 		ResourceID: string(resID),
 		Desired: &provider.DesiredState{
 			Name:   name,
 			Spec:   cs.Spec,
-			Labels: provider.IdentityLabels(ownerID, string(resID), string(opID)),
+			Labels: labels,
 		},
 	})
 	if err != nil {

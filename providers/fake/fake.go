@@ -154,6 +154,25 @@ func (f *Fake) Hook(p HookPoint, fn func(HookCtx) error) {
 	f.hooks[p] = append(f.hooks[p], fn)
 }
 
+// InjectRunning plants a running object directly (test scaffolding for
+// ghost/adoption scenarios that cannot arise through Apply's dedup).
+func (f *Fake) InjectRunning(name string, labels map[string]string) provider.ExternalRef {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	id := strconv.Itoa(100000 + f.seq)
+	cp := map[string]string{}
+	for k, v := range labels {
+		cp[k] = v
+	}
+	f.objects[id] = &object{
+		id: id, name: name, state: "running", labels: cp,
+		spec:     compute.MachineSpec{ServerType: "cpx31", Image: "snapshot:injected"},
+		capacity: provider.Capacity{compute.DimCPU: 2, compute.DimMemoryMiB: 4096},
+	}
+	return provider.ExternalRef{ID: id}
+}
+
 // Objects returns ground truth (every non-gone object) for assertions.
 func (f *Fake) Objects() []provider.ObservedResource {
 	f.mu.Lock()
