@@ -105,9 +105,9 @@ type AcquisitionStore interface {
 	Get(ctx context.Context, id AcquisitionID) (*Acquisition, error)
 	// Transition CASes on from-state; ErrConflict on mismatch.
 	Transition(ctx context.Context, id AcquisitionID, from, to AcqState, atMillis int64) error
-	// Bind links the satisfied acquisition to its lease and resource in the
-	// reservation transaction (plan R5).
-	Bind(ctx context.Context, id AcquisitionID, lease LeaseID, res ResourceID, atMillis int64) error
+	// Bind links the satisfied acquisition to its lease in the reservation
+	// transaction (plan R5); the resource is reachable via the lease.
+	Bind(ctx context.Context, id AcquisitionID, lease LeaseID, atMillis int64) error
 	SetPendingResource(ctx context.Context, id AcquisitionID, res ResourceID) error
 	// ListByState powers acquisition crash-resume (plan R6).
 	ListByState(ctx context.Context, states ...AcqState) ([]*Acquisition, error)

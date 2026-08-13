@@ -28,6 +28,7 @@ const migrationsDir = "migrations"
 type DB struct {
 	writer *sql.DB
 	reader *sql.DB
+	path   string
 }
 
 // Open opens (creating if needed) the database, applies the connection
@@ -47,7 +48,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		_ = w.Close()
 		return nil, fmt.Errorf("open reader: %w", err)
 	}
-	db := &DB{writer: w, reader: r}
+	db := &DB{writer: w, reader: r, path: path}
 	if err := db.Ping(ctx); err != nil {
 		_ = db.Close()
 		return nil, err

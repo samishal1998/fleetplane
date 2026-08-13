@@ -15,13 +15,14 @@ import (
 	"sync/atomic"
 
 	"github.com/samimishal/fleetplane/internal/config"
+	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
 )
 
 type App struct {
 	cfg   *config.Config
 	log   *slog.Logger
-	db    *sqlite.DB
+	db    storage.Store
 	ready atomic.Bool
 
 	mainLn net.Listener
@@ -31,7 +32,7 @@ type App struct {
 // New loads storage (including migrations). Readiness stays false until
 // Serve has verified the store.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error) {
-	db, err := sqlite.Open(ctx, cfg.Storage.Path)
+	db, err := sqlite.OpenStore(ctx, cfg.Storage.Path)
 	if err != nil {
 		return nil, fmt.Errorf("storage: %w", err)
 	}
