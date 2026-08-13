@@ -126,7 +126,18 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCmd) (Outcome, error) 
 }
 
 func (s *Service) GetAcquisition(ctx context.Context, id string) (*storage.Acquisition, error) {
-	return s.st.Acquisitions().Get(ctx, storage.AcquisitionID(id))
+	acq, err := s.st.Acquisitions().Get(ctx, storage.AcquisitionID(id))
+	if err != nil {
+		return nil, err
+	}
+	// Bound acquisitions reach their resource via the lease; surface it on
+	// the (otherwise cleared) pending field so the envelope carries it.
+	if acq.State == storage.AcqBound && acq.LeaseID != nil && acq.PendingResourceID == nil {
+		if lease, err := s.st.Leases().Get(ctx, *acq.LeaseID); err == nil {
+			acq.PendingResourceID = &lease.ResourceID
+		}
+	}
+	return acq, nil
 }
 
 // Release ends an acquisition (DELETE /v1/acquisitions/{id}). Releasing an
