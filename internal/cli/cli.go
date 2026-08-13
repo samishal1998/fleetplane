@@ -57,7 +57,7 @@ func Execute(version string) int {
 	cmd.PersistentFlags().StringVarP(&r.output, "output", "o", "table", "output format: table|json")
 
 	cmd.AddCommand(versionCmd(version), serveCmd(), resourcesCmd(r),
-		acquireCmd(r), releaseCmd(r), watchCmd(r),
+		acquireCmd(r), releaseCmd(r), watchCmd(r), applyCmd(r),
 		poolsCmd(r), operationsCmd(r), eventsCmd(r), providersCmd(r),
 		tokenCmd(), adminCmd())
 

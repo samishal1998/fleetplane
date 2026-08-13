@@ -409,7 +409,7 @@ func (e *Engine) readinessGate(ctx context.Context, op *storage.Operation, statu
 		return true, nil // no record to gate on
 	}
 	spec, err := compute.ParseSpec(res.Spec)
-	if err != nil || spec.Readiness == nil || spec.Readiness.TCP == nil {
+	if err != nil || spec.Readiness == nil || (spec.Readiness.TCP == nil && spec.Readiness.HTTP == nil) {
 		return true, nil // not a probed compute spec
 	}
 	budget := spec.Readiness.Budget.Std()

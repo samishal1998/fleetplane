@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,11 +37,48 @@ func TestParseSpecRejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestHTTPProbeRejectedInV1(t *testing.T) {
-	raw := json.RawMessage(`{"serverType":"a","image":"b","readiness":{"http":{"port":80,"path":"/"}}}`)
-	_, err := ParseSpec(raw)
-	if err == nil || !strings.Contains(err.Error(), "http") {
-		t.Fatalf("err = %v, want http-not-supported (plan R16)", err)
+func TestHTTPProbeValidation(t *testing.T) {
+	// Valid HTTP probe.
+	raw := json.RawMessage(`{"serverType":"a","image":"b","readiness":{"http":{"port":80,"path":"/healthz"}}}`)
+	if _, err := ParseSpec(raw); err != nil {
+		t.Fatalf("valid http probe rejected: %v", err)
+	}
+	// Path must be absolute; tcp+http together is ambiguous.
+	for _, bad := range []string{
+		`{"serverType":"a","image":"b","readiness":{"http":{"port":80,"path":"healthz"}}}`,
+		`{"serverType":"a","image":"b","readiness":{"http":{"port":80,"path":"/"},"tcp":{"port":22}}}`,
+		`{"serverType":"a","image":"b","readiness":{}}`,
+	} {
+		if _, err := ParseSpec(json.RawMessage(bad)); err == nil {
+			t.Errorf("accepted invalid readiness: %s", bad)
+		}
+	}
+}
+
+func TestProbeOnceHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	host, portStr, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	port, _ := strconv.Atoi(portStr)
+	addrs := []provider.Address{{Network: "public-v4", Addr: host}}
+
+	ok := &ReadinessSpec{HTTP: &HTTPProbe{Port: port, Path: "/healthz"}}
+	if err := ProbeOnce(context.Background(), addrs, ok); err != nil {
+		t.Fatalf("http probe against healthy endpoint: %v", err)
+	}
+	bad := &ReadinessSpec{HTTP: &HTTPProbe{Port: port, Path: "/broken"}}
+	if err := ProbeOnce(context.Background(), addrs, bad); err == nil {
+		t.Fatal("http probe accepted a 500")
+	}
+	exact := &ReadinessSpec{HTTP: &HTTPProbe{Port: port, Path: "/broken", ExpectStatus: 500}}
+	if err := ProbeOnce(context.Background(), addrs, exact); err != nil {
+		t.Fatalf("expectStatus not honored: %v", err)
 	}
 }
 
