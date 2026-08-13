@@ -21,8 +21,11 @@ test:
 	$(GO) test -race -shuffle=on -count=1 ./...
 
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... \
-		|| echo "golangci-lint not installed locally; CI runs it (make lint-install)"
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not installed locally (make lint-install); CI runs it"; \
+	fi
 
 lint-install:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \

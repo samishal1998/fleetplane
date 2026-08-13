@@ -1,0 +1,9 @@
+# Minimal Fleetplane configuration (grows with each increment; unknown
+# fields are rejected at boot — ADR-007).
+server:
+  addr: ":8080"
+  opsAddr: "127.0.0.1:9090"
+  shutdownGrace: 20s
+
+storage:
+  path: /var/lib/fleetplane/fleetplane.db
