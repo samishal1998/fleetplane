@@ -16,7 +16,7 @@ import (
 	"github.com/samimishal/fleetplane/internal/reconcile"
 	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
+	"github.com/samimishal/fleetplane/pkg/kinds"
 	"github.com/samimishal/fleetplane/pkg/sdk"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 )
@@ -92,18 +92,16 @@ type CreateResourceCmd struct {
 // CreateResource journals a create (TxA) and returns immediately; the
 // operation engine converges the resource to ready asynchronously.
 func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Outcome, error) {
-	if cmd.Kind != string(compute.Kind) {
-		return Outcome{}, invalid("unknown resource kind %q", cmd.Kind)
+	kind := provider.ResourceKind(cmd.Kind)
+	if err := kinds.Validate(kind, cmd.Spec); err != nil {
+		return Outcome{}, &ValidationError{Msg: err.Error()}
 	}
 	inst, ok := s.providers.Instance(storage.ProviderInstance(cmd.Provider))
 	if !ok {
 		return Outcome{}, invalid("unknown provider instance %q (configured: %v)", cmd.Provider, s.providers.Names())
 	}
-	if _, err := compute.ParseSpec(cmd.Spec); err != nil {
-		return Outcome{}, &ValidationError{Msg: err.Error()}
-	}
-	if _, ok := inst.ResourceDriver(compute.Kind); !ok {
-		return Outcome{}, invalid("provider %q does not drive %s", cmd.Provider, compute.Kind)
+	if _, ok := inst.ResourceDriver(kind); !ok {
+		return Outcome{}, invalid("provider %q does not drive %s", cmd.Provider, kind)
 	}
 
 	nowMs := s.clock.Now().UnixMilli()

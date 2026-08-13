@@ -98,11 +98,20 @@ func (r *Reconciler) SweepProvider(ctx context.Context, instanceName string) err
 	if !ok {
 		return fmt.Errorf("unknown provider instance %q", instanceName)
 	}
-	// One driver per kind; v1 is compute-only.
-	driver, ok := inst.ResourceDriver(provider.ResourceKind("compute.machine"))
-	if !ok {
-		return nil
+	// Sweep every kind the provider declares (Phase 9: kind-agnostic).
+	for _, kind := range inst.Descriptor().Kinds {
+		driver, ok := inst.ResourceDriver(kind)
+		if !ok {
+			continue
+		}
+		if err := r.sweepKind(ctx, instanceName, kind, driver); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (r *Reconciler) sweepKind(ctx context.Context, instanceName string, kind provider.ResourceKind, driver provider.ResourceDriver) error {
 
 	scope := provider.ScopeOwned
 	if r.disc.cfg.AdoptUnlabeled == "observed" {
@@ -114,7 +123,7 @@ func (r *Reconciler) SweepProvider(ctx context.Context, instanceName string) err
 	}
 
 	all, err := r.st.Resources().List(ctx, storage.ResourceFilter{
-		Provider: storage.ProviderInstance(instanceName), IncludeDeleted: true,
+		Provider: storage.ProviderInstance(instanceName), Kind: string(kind), IncludeDeleted: true,
 	})
 	if err != nil {
 		return err

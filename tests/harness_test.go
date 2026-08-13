@@ -122,6 +122,10 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 			Spec:    json.RawMessage(machineSpec),
 			Reclaim: &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(10 * time.Minute)},
 		},
+		"vol-100": reconcile.Class{
+			Kind: "storage.volume", Provider: "fake-local",
+			Spec: json.RawMessage(`{"sizeGiB":100,"filesystem":"ext4"}`),
+		},
 	}
 	h.Rec = reconcile.New(st, providers, h.Engine, classes, h.Clock, log, ownerID, reconcile.Config{})
 	h.Sched = scheduler.New(st, providers, h.Engine, classes, h.Clock, log, ownerID)

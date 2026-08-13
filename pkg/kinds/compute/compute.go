@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/samimishal/fleetplane/pkg/kinds"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 )
 
@@ -19,6 +20,17 @@ const (
 	DimCPU       provider.Dimension = "cpu"
 	DimMemoryMiB provider.Dimension = "memoryMiB"
 )
+
+func init() {
+	kinds.Register(kinds.Descriptor{
+		Kind: Kind,
+		ValidateSpec: func(raw json.RawMessage) error {
+			_, err := ParseSpec(raw)
+			return err
+		},
+		CapacityDims: []provider.Dimension{DimCPU, DimMemoryMiB},
+	})
+}
 
 // MachineSpec is the kind-specific spec (the class expansion target, plan
 // R15). Provider-specific fields are allowed in classes (04 §2); unknown
@@ -77,7 +89,8 @@ type TCPProbe struct {
 	Timeout Duration `json:"timeout,omitempty"`
 }
 
-// HTTPProbe is reserved for a future version (plan R16).
+// HTTPProbe passes when GET http://addr:port/path answers ExpectStatus
+// (default: any 2xx).
 type HTTPProbe struct {
 	Port         int      `json:"port"`
 	Path         string   `json:"path"`
@@ -86,14 +99,22 @@ type HTTPProbe struct {
 }
 
 func (r *ReadinessSpec) Validate() error {
-	if r.HTTP != nil {
-		return fmt.Errorf("compute.machine readiness: http probes are not supported in v1 (use tcp)")
+	if r.TCP == nil && r.HTTP == nil {
+		return fmt.Errorf("compute.machine readiness: a probe (tcp or http) is required when readiness is set")
 	}
-	if r.TCP == nil {
-		return fmt.Errorf("compute.machine readiness: a probe (tcp) is required when readiness is set")
+	if r.TCP != nil && r.HTTP != nil {
+		return fmt.Errorf("compute.machine readiness: declare either tcp or http, not both")
 	}
-	if r.TCP.Port <= 0 || r.TCP.Port > 65535 {
+	if r.TCP != nil && (r.TCP.Port <= 0 || r.TCP.Port > 65535) {
 		return fmt.Errorf("compute.machine readiness: tcp.port %d out of range", r.TCP.Port)
+	}
+	if r.HTTP != nil {
+		if r.HTTP.Port <= 0 || r.HTTP.Port > 65535 {
+			return fmt.Errorf("compute.machine readiness: http.port %d out of range", r.HTTP.Port)
+		}
+		if r.HTTP.Path == "" || r.HTTP.Path[0] != '/' {
+			return fmt.Errorf("compute.machine readiness: http.path must start with /")
+		}
 	}
 	return nil
 }

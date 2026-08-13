@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
+	"github.com/samimishal/fleetplane/pkg/kinds/volume"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 )
 
@@ -78,6 +79,8 @@ type Fake struct {
 	seq      int
 	objects  map[string]*object
 
+	volumes map[string]*volObject
+
 	applyFaults    []applyFault
 	rateLimitLeft  int
 	rateRetryAfter time.Duration
@@ -104,6 +107,7 @@ func New(instance, ownerID string, opt Options) *Fake {
 	return &Fake{
 		instance: instance, ownerID: ownerID, opt: opt,
 		objects: map[string]*object{},
+		volumes: map[string]*volObject{},
 		hooks:   map[HookPoint][]func(HookCtx) error{},
 	}
 }
@@ -212,20 +216,24 @@ func (f *Fake) rateLimitedLocked() error {
 func (f *Fake) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
 		Driver: Driver, Instance: f.instance, Version: "dev",
-		Kinds:                  []provider.ResourceKind{compute.Kind},
+		Kinds:                  []provider.ResourceKind{compute.Kind, volume.Kind},
 		SupportsLabelDiscovery: true,
 	}
 }
 
 func (f *Fake) Capabilities(context.Context) ([]provider.CapabilityID, error) {
-	return []provider.CapabilityID{"compute.machine.create"}, nil
+	return []provider.CapabilityID{"compute.machine.create", "storage.volume.create"}, nil
 }
 
 func (f *Fake) ResourceDriver(kind provider.ResourceKind) (provider.ResourceDriver, bool) {
-	if kind != compute.Kind {
+	switch kind {
+	case compute.Kind:
+		return f, true
+	case volume.Kind:
+		return &fakeVolumes{f: f}, true
+	default:
 		return nil, false
 	}
-	return f, true
 }
 
 func (f *Fake) Health(context.Context) error { return nil }
