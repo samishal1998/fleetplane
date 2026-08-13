@@ -1,4 +1,4 @@
-package hetzner
+package pacing
 
 import (
 	"context"
@@ -16,10 +16,10 @@ import (
 // parking until Reset would freeze operations for up to an hour. Instead:
 //
 //	Remaining == 0            → park until min(Reset, now+60s)
-//	Remaining < lowWater (20) → throttle to the refill rate (1 req/s)
-//	Remaining ≥ highWater(100)→ restore the base rate
-//	HTTP 429                  → park min(lowWater−Remaining, 60)s, floor 1s
-type pacer struct {
+//	Remaining < LowWater (20) → throttle to the refill rate (1 req/s)
+//	Remaining ≥ HighWater(100)→ restore the base rate
+//	HTTP 429                  → park min(LowWater−Remaining, 60)s, floor 1s
+type Pacer struct {
 	mu      sync.Mutex
 	limiter *rate.Limiter
 	sem     *semaphore.Weighted
@@ -29,12 +29,12 @@ type pacer struct {
 }
 
 const (
-	lowWater  = 20
-	highWater = 100
-	parkCap   = 60 * time.Second
+	LowWater  = 20
+	HighWater = 100
+	ParkCap   = 60 * time.Second
 )
 
-func newPacer(rps float64, burst, maxConcurrent int, now func() time.Time) *pacer {
+func New(rps float64, burst, maxConcurrent int, now func() time.Time) *Pacer {
 	if rps <= 0 {
 		rps = 5
 	}
@@ -47,7 +47,7 @@ func newPacer(rps float64, burst, maxConcurrent int, now func() time.Time) *pace
 	if now == nil {
 		now = time.Now
 	}
-	return &pacer{
+	return &Pacer{
 		limiter: rate.NewLimiter(rate.Limit(rps), burst),
 		sem:     semaphore.NewWeighted(int64(maxConcurrent)),
 		base:    rate.Limit(rps),
@@ -56,7 +56,7 @@ func newPacer(rps float64, burst, maxConcurrent int, now func() time.Time) *pace
 }
 
 // acquire gates one API call; the returned release must be called after.
-func (p *pacer) acquire(ctx context.Context) (release func(), err error) {
+func (p *Pacer) Acquire(ctx context.Context) (release func(), err error) {
 	p.mu.Lock()
 	parked := p.parked
 	p.mu.Unlock()
@@ -77,8 +77,8 @@ func (p *pacer) acquire(ctx context.Context) (release func(), err error) {
 }
 
 // observe applies the header policy after a successful response.
-func (p *pacer) observe(remaining int, reset time.Time) {
-	park, limit := decidePace(p.base, remaining, reset, p.now())
+func (p *Pacer) Observe(remaining int, reset time.Time) {
+	park, limit := DecidePace(p.base, remaining, reset, p.now())
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !park.IsZero() {
@@ -88,13 +88,13 @@ func (p *pacer) observe(remaining int, reset time.Time) {
 }
 
 // on429 applies the 429 policy.
-func (p *pacer) on429(remaining int) time.Duration {
-	d := time.Duration(lowWater-remaining) * time.Second
+func (p *Pacer) On429(remaining int) time.Duration {
+	d := time.Duration(LowWater-remaining) * time.Second
 	if d < time.Second {
 		d = time.Second
 	}
-	if d > parkCap {
-		d = parkCap
+	if d > ParkCap {
+		d = ParkCap
 	}
 	p.mu.Lock()
 	p.parked = p.now().Add(d)
@@ -103,17 +103,17 @@ func (p *pacer) on429(remaining int) time.Duration {
 }
 
 // decidePace is the pure policy (unit-tested directly).
-func decidePace(base rate.Limit, remaining int, reset, now time.Time) (park time.Time, limit rate.Limit) {
+func DecidePace(base rate.Limit, remaining int, reset, now time.Time) (park time.Time, limit rate.Limit) {
 	switch {
 	case remaining == 0:
 		until := reset
-		if cap := now.Add(parkCap); until.After(cap) || until.IsZero() {
+		if cap := now.Add(ParkCap); until.After(cap) || until.IsZero() {
 			until = cap
 		}
 		return until, 1
-	case remaining < lowWater:
+	case remaining < LowWater:
 		return time.Time{}, 1 // the documented refill rate
-	case remaining >= highWater:
+	case remaining >= HighWater:
 		return time.Time{}, base
 	default:
 		return time.Time{}, 1 // recovering: stay at refill rate until comfortable

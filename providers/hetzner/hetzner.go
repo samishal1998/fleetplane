@@ -18,6 +18,7 @@ import (
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
+	"github.com/samimishal/fleetplane/providers/pacing"
 )
 
 const Driver = "hetzner"
@@ -43,7 +44,7 @@ type Hetzner struct {
 	instance string
 	ownerID  string
 	location string
-	pacer    *pacer
+	pacer    *pacing.Pacer
 }
 
 func New(ctx context.Context, cfg provider.InstanceConfig) (*Hetzner, error) {
@@ -82,7 +83,7 @@ func New(ctx context.Context, cfg provider.InstanceConfig) (*Hetzner, error) {
 		instance: cfg.Instance,
 		ownerID:  cfg.OwnerID,
 		location: s.Location,
-		pacer:    newPacer(s.RPS, s.Burst, s.MaxConc, nil),
+		pacer:    pacing.New(s.RPS, s.Burst, s.MaxConc, nil),
 	}, nil
 }
 
@@ -108,7 +109,7 @@ func (h *Hetzner) ResourceDriver(kind provider.ResourceKind) (provider.ResourceD
 }
 
 func (h *Hetzner) Health(ctx context.Context) error {
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func (h *Hetzner) Close() error { return nil }
 func (h *Hetzner) Kind() provider.ResourceKind { return compute.Kind }
 
 func (h *Hetzner) Discover(ctx context.Context, req provider.DiscoverRequest) ([]provider.ObservedResource, error) {
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +165,7 @@ func (h *Hetzner) Get(ctx context.Context, ref provider.ExternalRef) (provider.O
 		return provider.ObservedResource{}, &provider.Error{Class: provider.ErrInvalid,
 			SideEffect: provider.EffectNone, Provider: h.instance, Message: "malformed server id " + ref.ID}
 	}
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return provider.ObservedResource{}, err
 	}
@@ -269,7 +270,7 @@ func (h *Hetzner) applyCreate(ctx context.Context, action provider.Action) (prov
 		opts.Location = &hcloud.Location{Name: loc}
 	}
 
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return provider.OperationRef{}, err
 	}
@@ -306,7 +307,7 @@ func (h *Hetzner) applyDelete(ctx context.Context, action provider.Action) (prov
 		return provider.OperationRef{}, &provider.Error{Class: provider.ErrInvalid,
 			SideEffect: provider.EffectNone, Provider: h.instance, Message: "malformed server id " + action.Ref.ID}
 	}
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return provider.OperationRef{}, err
 	}
@@ -340,7 +341,7 @@ func (h *Hetzner) ObserveOperation(ctx context.Context, op provider.OperationRef
 	}
 	// Poll pending provider actions by ID — never lists (05 §10).
 	for _, actionID := range data.Actions {
-		release, err := h.pacer.acquire(ctx)
+		release, err := h.pacer.Acquire(ctx)
 		if err != nil {
 			return provider.OperationStatus{}, err
 		}
@@ -386,7 +387,7 @@ func (h *Hetzner) ObserveOperation(ctx context.Context, op provider.OperationRef
 // --- lookups ---
 
 func (h *Hetzner) serverType(ctx context.Context, name string) (*hcloud.ServerType, error) {
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +413,7 @@ func (h *Hetzner) image(ctx context.Context, spec string, arch hcloud.Architectu
 		return nil, &provider.Error{Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
 			Provider: h.instance, Message: `image must be "id:<n>", "name:<os>" or "snapshot:<label-selector>"`}
 	}
-	release, err := h.pacer.acquire(ctx)
+	release, err := h.pacer.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +527,7 @@ func (h *Hetzner) observeResp(resp *hcloud.Response) {
 	if resp == nil || resp.Meta.Ratelimit.Limit == 0 {
 		return // no rate headers present
 	}
-	h.pacer.observe(resp.Meta.Ratelimit.Remaining, resp.Meta.Ratelimit.Reset)
+	h.pacer.Observe(resp.Meta.Ratelimit.Remaining, resp.Meta.Ratelimit.Reset)
 }
 
 // mapErr folds hcloud errors into the typed model (03 §7). effectIfSent is
@@ -540,7 +541,7 @@ func (h *Hetzner) mapErr(err error, effectIfSent provider.SideEffect) error {
 			e.Class, e.SideEffect = provider.ErrNotFound, provider.EffectNone
 		case hcloud.ErrorCodeRateLimitExceeded: // incl. legacy limit_reached alias
 			e.Class, e.SideEffect = provider.ErrRateLimited, provider.EffectNone
-			e.RetryAfter = h.pacer.on429(0)
+			e.RetryAfter = h.pacer.On429(0)
 		case hcloud.ErrorCodeConflict, hcloud.ErrorCodeLocked, hcloud.ErrorCodeUniquenessError:
 			e.Class, e.SideEffect = provider.ErrConflict, effectIfSent
 		case hcloud.ErrorCodeResourceLimitExceeded:

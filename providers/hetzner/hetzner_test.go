@@ -15,6 +15,8 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"golang.org/x/time/rate"
 
+	"github.com/samimishal/fleetplane/providers/pacing"
+
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
@@ -213,7 +215,7 @@ func TestDeleteOfDeletedIsSuccess(t *testing.T) {
 }
 
 func TestErrorMapping(t *testing.T) {
-	h := &Hetzner{instance: "t", pacer: newPacer(100, 100, 5, nil)}
+	h := &Hetzner{instance: "t", pacer: pacing.New(100, 100, 5, nil)}
 	cases := []struct {
 		code   string
 		class  provider.ErrorClass
@@ -250,27 +252,27 @@ func TestPacerPolicy(t *testing.T) {
 	base := rate.Limit(5)
 
 	// Remaining 0: park until min(Reset, now+60s) — NEVER the full 45m.
-	park, limit := decidePace(base, 0, reset, now)
-	if park != now.Add(parkCap) || limit != 1 {
+	park, limit := pacing.DecidePace(base, 0, reset, now)
+	if park != now.Add(pacing.ParkCap) || limit != 1 {
 		t.Fatalf("remaining=0: park=%v limit=%v", park, limit)
 	}
 	// Low water: throttle to the refill rate, no park.
-	park, limit = decidePace(base, 10, reset, now)
+	park, limit = pacing.DecidePace(base, 10, reset, now)
 	if !park.IsZero() || limit != 1 {
 		t.Fatalf("remaining=10: park=%v limit=%v", park, limit)
 	}
 	// Recovered: base rate restored.
-	park, limit = decidePace(base, 500, reset, now)
+	park, limit = pacing.DecidePace(base, 500, reset, now)
 	if !park.IsZero() || limit != base {
 		t.Fatalf("remaining=500: park=%v limit=%v", park, limit)
 	}
 
 	// A parked pacer refuses calls with a RetryAfter instead of blocking.
-	p := newPacer(5, 10, 5, nil)
-	if d := p.on429(0); d < time.Second || d > parkCap {
+	p := pacing.New(5, 10, 5, nil)
+	if d := p.On429(0); d < time.Second || d > pacing.ParkCap {
 		t.Fatalf("429 park duration = %v", d)
 	}
-	_, err := p.acquire(context.Background())
+	_, err := p.Acquire(context.Background())
 	if !provider.IsClass(err, provider.ErrRateLimited) {
 		t.Fatalf("parked pacer: %v", err)
 	}
