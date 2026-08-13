@@ -14,9 +14,14 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/samimishal/fleetplane/internal/api"
+	"github.com/samimishal/fleetplane/internal/app"
 	"github.com/samimishal/fleetplane/internal/config"
+	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
+	"github.com/samimishal/fleetplane/pkg/sdk"
+	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
 )
 
 type App struct {
@@ -25,18 +30,53 @@ type App struct {
 	db    storage.Store
 	ready atomic.Bool
 
+	providers *app.Providers
+	engine    *operations.Engine
+	service   *app.Service
+	api       *api.Server
+
 	mainLn net.Listener
 	opsLn  net.Listener
 }
 
-// New loads storage (including migrations). Readiness stays false until
-// Serve has verified the store.
+// New wires storage (including migrations), provider instances, the
+// operation engine and the app service. Readiness stays false until Serve
+// has verified the store AND journal recovery completed (plan R11).
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error) {
 	db, err := sqlite.OpenStore(ctx, cfg.Storage.Path)
 	if err != nil {
 		return nil, fmt.Errorf("storage: %w", err)
 	}
-	return &App{cfg: cfg, log: log, db: db}, nil
+	clock := sdk.Real{}
+	ownerID, err := app.EnsureOwnerID(ctx, db, clock.Now().UnixMilli())
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("instance identity: %w", err)
+	}
+
+	var specs []app.ProviderSpec
+	for name, p := range cfg.Providers {
+		settings, err := json.Marshal(p.Settings)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("providers.%s: %w", name, err)
+		}
+		specs = append(specs, app.ProviderSpec{Name: name, Driver: p.Driver, Settings: settings})
+	}
+	providers, err := app.BuildProviders(ctx, db, specs, ownerID, secretref.NewDefault(), log, clock.Now().UnixMilli())
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	engine := operations.New(db, providers, clock, log, operations.Config{}, operations.Hooks{})
+	service := app.NewService(db, providers, engine, clock, log, ownerID)
+	a := &App{
+		cfg: cfg, log: log.With("owner_id", ownerID), db: db,
+		providers: providers, engine: engine, service: service,
+		api: api.New(service, log),
+	}
+	return a, nil
 }
 
 // Listen binds the main and ops listeners; addresses are readable via
@@ -68,6 +108,7 @@ func (a *App) Serve(ctx context.Context) error {
 	health := a.healthHandler()
 	mainMux := http.NewServeMux()
 	mainMux.Handle("/health/", health)
+	mainMux.Handle("/v1/", a.mutationGate(a.api.Handler()))
 	opsMux := http.NewServeMux()
 	opsMux.Handle("/health/", health)
 
@@ -78,13 +119,21 @@ func (a *App) Serve(ctx context.Context) error {
 	go func() { errc <- mainSrv.Serve(a.mainLn) }()
 	go func() { errc <- opsSrv.Serve(a.opsLn) }()
 
+	engineCtx, stopEngine := context.WithCancel(ctx)
+	defer stopEngine()
+	go a.engine.Run(engineCtx)
+
+	// Readiness = storage ping ∧ journal recovery complete (plan R11).
+	// Provider health never affects readiness (07 §8).
 	if err := a.db.Ping(ctx); err != nil {
 		a.log.Error("storage unavailable at boot", "error", err)
+	} else if err := a.engine.Resume(ctx); err != nil {
+		a.log.Error("journal recovery failed; mutations stay gated", "error", err)
 	} else {
 		a.ready.Store(true)
 		a.log.Info("fleetplane ready",
 			"addr", a.mainLn.Addr().String(), "opsAddr", a.opsLn.Addr().String(),
-			"db", a.cfg.Storage.Path)
+			"db", a.cfg.Storage.Path, "providers", a.providers.Names())
 	}
 
 	select {
@@ -110,12 +159,32 @@ func (a *App) Serve(ctx context.Context) error {
 }
 
 func (a *App) close() error {
+	if a.providers != nil {
+		a.providers.Close()
+	}
 	if err := a.db.Close(); err != nil {
 		a.log.Error("closing storage", "error", err)
 		return err
 	}
 	return nil
 }
+
+// mutationGate 503s mutating requests until recovery completes and during
+// shutdown drain (plan R11; 07 §9). Reads always pass.
+func (a *App) mutationGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.ready.Load() && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusServiceUnavailable,
+				map[string]any{"error": map[string]any{"code": "unready", "message": "recovery in progress or shutting down", "retryable": true}})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Service exposes the app facade (used by tests and later the CLI serve path).
+func (a *App) Service() *app.Service { return a.service }
 
 func (a *App) healthHandler() http.Handler {
 	mux := http.NewServeMux()

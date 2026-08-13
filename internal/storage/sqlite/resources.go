@@ -208,6 +208,13 @@ func (rs resourceStore) SetExternalRef(ctx context.Context, id storage.ResourceI
 		extID, nb(ref), string(id))
 }
 
+func (rs resourceStore) SetProviderFacts(ctx context.Context, id storage.ResourceID, extension, capacity json.RawMessage, atMillis int64) error {
+	return rs.execOne(ctx,
+		`UPDATE resources SET extension_json=COALESCE(?, extension_json),
+		   capacity_json=COALESCE(?, capacity_json), updated_at=? WHERE id=?`,
+		nb(extension), nb(capacity), atMillis, string(id))
+}
+
 func (rs resourceStore) SetLastLeaseEnded(ctx context.Context, id storage.ResourceID, atMillis int64) error {
 	return rs.execOne(ctx, `UPDATE resources SET last_lease_ended_at=?, updated_at=? WHERE id=?`,
 		atMillis, atMillis, string(id))

@@ -6,6 +6,11 @@ linters:
     - depguard
     - misspell
   settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     depguard:
       rules:
         # ADR-009: the orchestration kernel never sees providers or cloud SDKs.

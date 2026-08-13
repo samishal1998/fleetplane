@@ -16,8 +16,16 @@ import (
 // increment-by-increment; strict decoding means the file may only contain
 // what the running binary actually implements.
 type Config struct {
-	Server  Server  `yaml:"server"`
-	Storage Storage `yaml:"storage"`
+	Server    Server              `yaml:"server"`
+	Storage   Storage             `yaml:"storage"`
+	Providers map[string]Provider `yaml:"providers"`
+}
+
+// Provider configures one provider instance (03 §4). Settings is the raw
+// driver config block; credentials inside must be secret:// references.
+type Provider struct {
+	Driver   string         `yaml:"driver"`
+	Settings map[string]any `yaml:"settings"`
 }
 
 type Server struct {
@@ -87,6 +95,11 @@ func (c *Config) applyDefaults() {
 func (c *Config) validate() error {
 	if c.Storage.Path == "" {
 		return fmt.Errorf("storage.path is required")
+	}
+	for name, p := range c.Providers {
+		if p.Driver == "" {
+			return fmt.Errorf("providers.%s.driver is required", name)
+		}
 	}
 	return nil
 }

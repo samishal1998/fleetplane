@@ -83,6 +83,9 @@ type ResourceStore interface {
 
 	SetObservedGeneration(ctx context.Context, id ResourceID, gen int64) error
 	SetExternalRef(ctx context.Context, id ResourceID, extID string, ref json.RawMessage) error
+	// SetProviderFacts stores observation-derived facts on the record:
+	// provider-native extension data (invariant 6) and capacity.
+	SetProviderFacts(ctx context.Context, id ResourceID, extension, capacity json.RawMessage, atMillis int64) error
 	SetLastLeaseEnded(ctx context.Context, id ResourceID, atMillis int64) error
 
 	// MarkDeleted tombstones (ADR-017). Rows are never hard-deleted.

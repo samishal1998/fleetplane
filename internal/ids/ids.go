@@ -21,6 +21,7 @@ const (
 	Event       Prefix = "evt"
 	Token       Prefix = "tok"
 	Request     Prefix = "req"
+	Owner       Prefix = "own"
 )
 
 // New mints a fresh prefixed ID, e.g. "res_01J9ZK...".
