@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/samimishal/fleetplane/internal/app"
+	"github.com/samimishal/fleetplane/internal/ids"
 	"github.com/samimishal/fleetplane/internal/operations"
+	"github.com/samimishal/fleetplane/internal/reconcile"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
@@ -55,6 +57,7 @@ type Harness struct {
 	Providers *app.Providers
 	Fake      *fake.Fake
 	Engine    *operations.Engine
+	Rec       *reconcile.Reconciler
 	Svc       *app.Service
 	Clock     *stepClock
 	Hooks     operations.Hooks
@@ -99,7 +102,108 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 	h.Providers = providers
 	h.Fake = inst.(*fake.Fake)
 	h.Engine = operations.New(st, providers, h.Clock, log, h.EngineCfg, h.Hooks)
+	classes := app.Classes{"ci": reconcile.Class{
+		Kind: "compute.machine", Provider: "fake-local",
+		Spec: json.RawMessage(machineSpec),
+	}}
+	h.Rec = reconcile.New(st, providers, h.Engine, classes, h.Clock, log, ownerID, reconcile.Config{})
+	h.Engine.OnTerminal = h.Rec.HandleOpTerminal
 	h.Svc = app.NewService(st, providers, h.Engine, h.Clock, log, ownerID)
+}
+
+// CreatePool upserts a pool spec and returns its ID.
+func (h *Harness) CreatePool(name string, spec reconcile.PoolSpec) storage.PoolID {
+	h.t.Helper()
+	raw, _ := json.Marshal(spec)
+	id := storage.PoolID(ids.New(ids.Pool))
+	err := h.St.Tx(context.Background(), func(tx storage.TxStore) error {
+		return tx.Pools().Upsert(context.Background(), &storage.Pool{
+			ID: id, Name: name, Kind: "compute.machine", Spec: raw,
+			Generation: 1, CreatedAt: h.Clock.Now().UnixMilli(), UpdatedAt: h.Clock.Now().UnixMilli(),
+		})
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+// UpdatePool replaces a pool's spec.
+func (h *Harness) UpdatePool(id storage.PoolID, name string, spec reconcile.PoolSpec) {
+	h.t.Helper()
+	raw, _ := json.Marshal(spec)
+	err := h.St.Tx(context.Background(), func(tx storage.TxStore) error {
+		return tx.Pools().Upsert(context.Background(), &storage.Pool{
+			ID: id, Name: name, Kind: "compute.machine", Spec: raw,
+			UpdatedAt: h.Clock.Now().UnixMilli(),
+		})
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// Converge alternates reconcile cycles with engine drives until the pool is
+// stable (no mutations decided, no open ops) or the bound trips.
+func (h *Harness) Converge(poolID storage.PoolID) reconcile.Delta {
+	h.t.Helper()
+	ctx := context.Background()
+	var last reconcile.Delta
+	for i := 0; i < 100; i++ {
+		d, err := h.Rec.RunOnce(ctx, poolID)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		last = d
+		h.DriveAll()
+		if d.Created == 0 && d.Drained == 0 && d.Undrained == 0 && d.Deleted == 0 {
+			open, err := h.St.Operations().NonTerminal(ctx)
+			if err != nil {
+				h.t.Fatal(err)
+			}
+			if len(open) == 0 {
+				return last
+			}
+		}
+		h.Clock.Advance(7 * time.Second)
+	}
+	h.t.Fatal("pool never converged")
+	return last
+}
+
+// DriveAll steps the engine until no operations remain non-terminal or
+// progress stalls past the bound.
+func (h *Harness) DriveAll() {
+	h.t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 200; i++ {
+		if _, err := h.Engine.Step(ctx); err != nil {
+			h.t.Fatal(err)
+		}
+		open, err := h.St.Operations().NonTerminal(ctx)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		if len(open) == 0 {
+			return
+		}
+		h.Clock.Advance(7 * time.Second)
+	}
+	h.t.Fatal("operations never drained")
+}
+
+// PoolPhases returns pool member counts by phase (tombstoned excluded).
+func (h *Harness) PoolPhases(poolID storage.PoolID) map[string]int {
+	h.t.Helper()
+	list, err := h.St.Resources().List(context.Background(), storage.ResourceFilter{PoolID: &poolID})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	out := map[string]int{}
+	for _, r := range list {
+		out[string(r.Phase)]++
+	}
+	return out
 }
 
 // Crash hard-stops the "process": the store closes without any shutdown

@@ -11,6 +11,7 @@ import (
 	"github.com/samimishal/fleetplane/internal/ids"
 	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/phase"
+	"github.com/samimishal/fleetplane/internal/provision"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk"
@@ -94,46 +95,26 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Ou
 	if _, err := compute.ParseSpec(cmd.Spec); err != nil {
 		return Outcome{}, &ValidationError{Msg: err.Error()}
 	}
-	driver, ok := inst.ResourceDriver(compute.Kind)
-	if !ok {
+	if _, ok := inst.ResourceDriver(compute.Kind); !ok {
 		return Outcome{}, invalid("provider %q does not drive %s", cmd.Provider, compute.Kind)
 	}
 
-	resID := storage.ResourceID(ids.New(ids.Resource))
-	opID := storage.OperationID(ids.New(ids.Operation))
-	name := cmd.Name
-	if name == "" {
-		name = string(resID)
-	}
-
-	// Plan is pure (03 §2); the kernel composes identity labels (R2) and
-	// stamps ActionID := OperationID after planning.
-	plan, err := driver.Plan(ctx, provider.PlanRequest{
-		ResourceID: string(resID),
-		Desired: &provider.DesiredState{
-			Name:   name,
-			Spec:   cmd.Spec,
-			Labels: provider.IdentityLabels(s.ownerID, string(resID), string(opID)),
-		},
-	})
-	if err != nil {
-		return Outcome{}, err
-	}
-	if len(plan.Actions) != 1 {
-		return Outcome{}, fmt.Errorf("driver planned %d actions for a create, want 1", len(plan.Actions))
-	}
-	action := plan.Actions[0]
-	action.ActionID = string(opID)
-	actionJSON, err := json.Marshal(action)
-	if err != nil {
-		return Outcome{}, err
-	}
-
 	nowMs := s.clock.Now().UnixMilli()
+	prepared, err := provision.Prepare(ctx, s.providers, s.ownerID, provision.CreateSpec{
+		Kind: cmd.Kind, Provider: cmd.Provider, Name: cmd.Name,
+		Spec: cmd.Spec, Labels: cmd.Labels,
+	}, nowMs)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if cmd.IdemKey != "" {
+		prepared.Op.IdemScope, prepared.Op.IdemKey = &cmd.IdemScope, &cmd.IdemKey
+	}
+
 	var out Outcome
 	err = s.st.Tx(ctx, func(tx storage.TxStore) error {
 		if cmd.IdemKey != "" {
-			outcome, rec, err := tx.Idempotency().Begin(ctx, cmd.IdemScope, cmd.IdemKey, cmd.RequestHash, opID)
+			outcome, rec, err := tx.Idempotency().Begin(ctx, cmd.IdemScope, cmd.IdemKey, cmd.RequestHash, prepared.Op.ID)
 			if err != nil {
 				return err
 			}
@@ -151,38 +132,10 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Ou
 				return ErrIdemMismatch
 			}
 		}
-
-		res := &storage.Resource{
-			ID: resID, Name: name, Kind: cmd.Kind,
-			Provider:  storage.ProviderInstance(cmd.Provider),
-			Ownership: storage.OwnershipManaged, Phase: phase.Provisioning,
-			Spec: cmd.Spec, Labels: cmd.Labels,
-			CreatedAt: nowMs, UpdatedAt: nowMs,
-		}
-		if err := tx.Resources().Create(ctx, res); err != nil {
+		if err := prepared.Journal(ctx, tx, cmd.Actor, cmd.IdemKey); err != nil {
 			return err
 		}
-		op := &storage.Operation{
-			ID: opID, Kind: storage.OpKindCreate, ResourceID: &resID,
-			Provider: storage.ProviderInstance(cmd.Provider),
-			Action:   actionJSON, State: storage.OpJournaled,
-			CreatedAt: nowMs, UpdatedAt: nowMs,
-		}
-		if cmd.IdemKey != "" {
-			op.IdemScope, op.IdemKey = &cmd.IdemScope, &cmd.IdemKey
-		}
-		if err := tx.Operations().Append(ctx, op); err != nil {
-			return err
-		}
-		if err := tx.Events().Append(ctx, &storage.Event{
-			TS: nowMs, Actor: cmd.Actor, IdemKey: cmd.IdemKey, Type: "resource.create",
-			ResourceID: &resID, OperationID: &opID,
-			Provider: storage.ProviderInstance(cmd.Provider),
-			Intent:   cmd.Spec, Outcome: "journaled",
-		}); err != nil {
-			return err
-		}
-		status, body := cmd.BuildResponse(res)
+		status, body := cmd.BuildResponse(prepared.Resource)
 		out = Outcome{Status: status, Body: body}
 		if cmd.IdemKey != "" {
 			// The journaled intent IS the side effect of an async-accept

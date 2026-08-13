@@ -18,8 +18,10 @@ import (
 	"github.com/samimishal/fleetplane/internal/app"
 	"github.com/samimishal/fleetplane/internal/config"
 	"github.com/samimishal/fleetplane/internal/operations"
+	"github.com/samimishal/fleetplane/internal/reconcile"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
+	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
 )
@@ -30,10 +32,11 @@ type App struct {
 	db    storage.Store
 	ready atomic.Bool
 
-	providers *app.Providers
-	engine    *operations.Engine
-	service   *app.Service
-	api       *api.Server
+	providers  *app.Providers
+	engine     *operations.Engine
+	reconciler *reconcile.Reconciler
+	service    *app.Service
+	api        *api.Server
 
 	mainLn net.Listener
 	opsLn  net.Listener
@@ -73,10 +76,30 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		PollInterval: cfg.Engine.PollInterval.Std(),
 		VerifyWindow: cfg.Engine.VerifyWindow.Std(),
 	}, operations.Hooks{})
+
+	classes := app.Classes{}
+	for name, cls := range cfg.Classes {
+		specJSON, err := json.Marshal(cls.Spec)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("classes.%s: %w", name, err)
+		}
+		rc := reconcile.Class{Kind: cls.Kind, Provider: cls.Provider, Spec: specJSON}
+		if cls.Reclaim != nil {
+			rc.Reclaim = &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(cls.Reclaim.IdleAfter.Std())}
+		}
+		classes[name] = rc
+	}
+	reconciler := reconcile.New(db, providers, engine, classes, clock, log, ownerID, reconcile.Config{
+		Interval:             cfg.Reconcile.Interval.Std(),
+		MaxMutationsPerCycle: cfg.Reconcile.MaxMutationsPerCycle,
+	})
+	engine.OnTerminal = reconciler.HandleOpTerminal
+
 	service := app.NewService(db, providers, engine, clock, log, ownerID)
 	a := &App{
 		cfg: cfg, log: log.With("owner_id", ownerID), db: db,
-		providers: providers, engine: engine, service: service,
+		providers: providers, engine: engine, reconciler: reconciler, service: service,
 		api: api.New(service, log),
 	}
 	return a, nil
@@ -125,6 +148,7 @@ func (a *App) Serve(ctx context.Context) error {
 	engineCtx, stopEngine := context.WithCancel(ctx)
 	defer stopEngine()
 	go a.engine.Run(engineCtx)
+	go a.reconciler.Run(engineCtx)
 
 	// Readiness = storage ping ∧ journal recovery complete (plan R11).
 	// Provider health never affects readiness (07 §8).
@@ -133,6 +157,7 @@ func (a *App) Serve(ctx context.Context) error {
 	} else if err := a.engine.Resume(ctx); err != nil {
 		a.log.Error("journal recovery failed; mutations stay gated", "error", err)
 	} else {
+		a.reconciler.KickAll()
 		a.ready.Store(true)
 		a.log.Info("fleetplane ready",
 			"addr", a.mainLn.Addr().String(), "opsAddr", a.opsLn.Addr().String(),

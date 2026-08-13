@@ -10,6 +10,7 @@ require (
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.56.0
+	pgregory.net/rapid v1.3.0
 )
 
 require (

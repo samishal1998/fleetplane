@@ -19,7 +19,29 @@ type Config struct {
 	Server    Server              `yaml:"server"`
 	Storage   Storage             `yaml:"storage"`
 	Providers map[string]Provider `yaml:"providers"`
+	Classes   map[string]Class    `yaml:"classes"`
 	Engine    Engine              `yaml:"engine"`
+	Reconcile Reconcile           `yaml:"reconcile"`
+}
+
+// Class is a reusable creation template (04 §2). Spec may contain
+// provider-specific fields; reclaim.idleAfter enables poolless idle
+// reclamation for resources created from this class (plan R21).
+type Class struct {
+	Kind     string         `yaml:"kind"`
+	Provider string         `yaml:"provider"`
+	Spec     map[string]any `yaml:"spec"`
+	Reclaim  *ClassReclaim  `yaml:"reclaim"`
+}
+
+type ClassReclaim struct {
+	IdleAfter Duration `yaml:"idleAfter"`
+}
+
+// Reconcile tunes the pool reconciler.
+type Reconcile struct {
+	Interval             Duration `yaml:"interval"`
+	MaxMutationsPerCycle int      `yaml:"maxMutationsPerCycle"` // R22: the one budget knob
 }
 
 // Engine tunes the operation engine (ADR-014 defaults apply when zero).
@@ -106,6 +128,14 @@ func (c *Config) validate() error {
 	for name, p := range c.Providers {
 		if p.Driver == "" {
 			return fmt.Errorf("providers.%s.driver is required", name)
+		}
+	}
+	for name, cls := range c.Classes {
+		if cls.Kind == "" || cls.Provider == "" {
+			return fmt.Errorf("classes.%s needs kind and provider", name)
+		}
+		if _, ok := c.Providers[cls.Provider]; !ok {
+			return fmt.Errorf("classes.%s references unknown provider %q", name, cls.Provider)
 		}
 	}
 	return nil
