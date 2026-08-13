@@ -3,8 +3,8 @@
 //
 // Design: single mutex, zero goroutines, step-clocked — asynchronous
 // progress advances per ObserveOperation/Discover CALL, never wall time, so
-// every test is deterministic. I2 ships the synchronous skeleton; step
-// counts, fault rules and list-lag land with the conformance increment.
+// every test is deterministic. Fault injection is a declarative rule queue
+// plus named hook points.
 package fake
 
 import (
@@ -24,8 +24,49 @@ const Driver = "fake"
 
 func init() {
 	provider.Register(Driver, func(_ context.Context, cfg provider.InstanceConfig) (provider.Provider, error) {
-		return New(cfg.Instance, cfg.OwnerID), nil
+		var opt Options
+		if len(cfg.Settings) > 0 && string(cfg.Settings) != "null" {
+			if err := json.Unmarshal(cfg.Settings, &opt); err != nil {
+				return nil, &provider.Error{Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
+					Message: "fake settings: " + err.Error()}
+			}
+		}
+		return New(cfg.Instance, cfg.OwnerID, opt), nil
 	})
+}
+
+// Options tune the deterministic async/consistency model. The zero value is
+// fully synchronous (creates land running, lists see everything at once).
+type Options struct {
+	CreateSteps  int `json:"createSteps"`  // ObserveOperation calls until a create lands running
+	DeleteSteps  int `json:"deleteSteps"`  // ObserveOperation calls until a delete lands gone
+	ListLagSteps int `json:"listLagSteps"` // Discover calls before a new object becomes listable
+	PageSize     int `json:"pageSize"`     // internal Discover pagination chunk (0 = single page)
+}
+
+// HookPoint names an interception point.
+type HookPoint int
+
+const (
+	BeforeApply HookPoint = iota
+	AfterAccept
+	BeforeObserve
+	BeforeDiscover
+)
+
+// HookCtx is passed to hooks; fields are set where meaningful.
+type HookCtx struct {
+	Action *provider.Action
+	OpRef  *provider.OperationRef
+}
+
+type applyFault struct {
+	class    provider.ErrorClass
+	effect   provider.SideEffect
+	mutate   bool // AcceptButDropResponse: perform the mutation, lose the reply
+	retryIn  time.Duration
+	message  string
+	kindOnly string // restrict to an action kind ("" = any)
 }
 
 // Fake implements provider.Provider and the compute.machine driver.
@@ -33,32 +74,125 @@ type Fake struct {
 	mu       sync.Mutex
 	instance string
 	ownerID  string
+	opt      Options
 	seq      int
-	objects  map[string]*object // by external ID
+	objects  map[string]*object
+
+	applyFaults    []applyFault
+	rateLimitLeft  int
+	rateRetryAfter time.Duration
+	hooks          map[HookPoint][]func(HookCtx) error
+
+	// Counters for test assertions.
+	ApplyCalls, ObserveCalls, DiscoverCalls int
 }
 
 type object struct {
-	id       string
-	name     string
-	state    string // "running" | "gone"
-	spec     compute.MachineSpec
-	labels   map[string]string
-	capacity provider.Capacity
+	id        string
+	name      string
+	state     string // creating | running | deleting | gone
+	stepsLeft int
+	listLag   int
+	spec      compute.MachineSpec
+	labels    map[string]string
+	capacity  provider.Capacity
 }
 
 // New builds an unregistered Fake (tests construct directly; production
 // config goes through provider.New).
-func New(instance, ownerID string) *Fake {
-	return &Fake{instance: instance, ownerID: ownerID, objects: map[string]*object{}}
+func New(instance, ownerID string, opt Options) *Fake {
+	return &Fake{
+		instance: instance, ownerID: ownerID, opt: opt,
+		objects: map[string]*object{},
+		hooks:   map[HookPoint][]func(HookCtx) error{},
+	}
+}
+
+// --- fault injection (plan R13) ---
+
+// FailNextApply queues n Apply failures of the given class/effect.
+func (f *Fake) FailNextApply(class provider.ErrorClass, effect provider.SideEffect, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := 0; i < n; i++ {
+		f.applyFaults = append(f.applyFaults, applyFault{
+			class: class, effect: effect, message: "injected apply failure",
+		})
+	}
+}
+
+// AcceptButDropResponse makes the next create Apply PERFORM the mutation and
+// then lose the response (FI-1): the caller sees EffectMaybe.
+func (f *Fake) AcceptButDropResponse() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applyFaults = append(f.applyFaults, applyFault{
+		class: provider.ErrRetryable, effect: provider.EffectMaybe,
+		mutate: true, message: "injected: response lost after accept", kindOnly: "create",
+	})
+}
+
+// RateLimitNext makes the next n driver calls fail rate-limited (FI-5).
+func (f *Fake) RateLimitNext(n int, retryAfter time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rateLimitLeft = n
+	f.rateRetryAfter = retryAfter
+}
+
+// SetListLagSteps overrides list visibility lag for future creates (FI-4).
+func (f *Fake) SetListLagSteps(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opt.ListLagSteps = n
+}
+
+// Hook installs fn at a hook point; returning an error aborts the call.
+func (f *Fake) Hook(p HookPoint, fn func(HookCtx) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hooks[p] = append(f.hooks[p], fn)
+}
+
+// Objects returns ground truth (every non-gone object) for assertions.
+func (f *Fake) Objects() []provider.ObservedResource {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []provider.ObservedResource
+	for _, o := range f.objects {
+		if o.state != "gone" {
+			out = append(out, f.observeLocked(o))
+		}
+	}
+	return out
+}
+
+func (f *Fake) runHooksLocked(p HookPoint, hc HookCtx) error {
+	for _, fn := range f.hooks[p] {
+		if err := fn(hc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *Fake) rateLimitedLocked() error {
+	if f.rateLimitLeft > 0 {
+		f.rateLimitLeft--
+		return &provider.Error{
+			Class: provider.ErrRateLimited, SideEffect: provider.EffectNone,
+			Provider: f.instance, Message: "injected rate limit",
+			RetryAfter: f.rateRetryAfter,
+		}
+	}
+	return nil
 }
 
 // --- provider.Provider ---
 
 func (f *Fake) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
-		Driver:                 Driver,
-		Instance:               f.instance,
-		Version:                "dev",
+		Driver: Driver, Instance: f.instance, Version: "dev",
 		Kinds:                  []provider.ResourceKind{compute.Kind},
 		SupportsLabelDiscovery: true,
 	}
@@ -85,9 +219,22 @@ func (f *Fake) Kind() provider.ResourceKind { return compute.Kind }
 func (f *Fake) Discover(_ context.Context, req provider.DiscoverRequest) ([]provider.ObservedResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []provider.ObservedResource
+	f.DiscoverCalls++
+	if err := f.runHooksLocked(BeforeDiscover, HookCtx{}); err != nil {
+		return nil, err
+	}
+	if err := f.rateLimitedLocked(); err != nil {
+		return nil, err
+	}
+	// One list pass = one consistency step for every lagged object.
 	for _, o := range f.objects {
-		if o.state == "gone" {
+		if o.listLag > 0 {
+			o.listLag--
+		}
+	}
+	var all []provider.ObservedResource
+	for _, o := range f.objects {
+		if o.state == "gone" || o.listLag > 0 {
 			continue
 		}
 		if req.Scope != provider.ScopeAll && !f.ownedLocked(o) {
@@ -96,18 +243,32 @@ func (f *Fake) Discover(_ context.Context, req provider.DiscoverRequest) ([]prov
 		if !labelsMatch(o.labels, req.Selector) {
 			continue
 		}
-		out = append(out, f.observeLocked(o))
+		all = append(all, f.observeLocked(o))
 	}
-	return out, nil
+	// Internal pagination: chunked assembly proves the code path the real
+	// providers exercise against cloud APIs.
+	if f.opt.PageSize > 0 {
+		var paged []provider.ObservedResource
+		for i := 0; i < len(all); i += f.opt.PageSize {
+			end := min(i+f.opt.PageSize, len(all))
+			paged = append(paged, all[i:end]...)
+		}
+		all = paged
+	}
+	return all, nil
 }
 
 func (f *Fake) Get(_ context.Context, ref provider.ExternalRef) (provider.ObservedResource, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.rateLimitedLocked(); err != nil {
+		return provider.ObservedResource{}, err
+	}
 	o, ok := f.objects[ref.ID]
 	if !ok || o.state == "gone" {
 		return provider.ObservedResource{}, f.notFound(ref.ID)
 	}
+	// Get by ref is authoritative regardless of list lag (05 §10).
 	return f.observeLocked(o), nil
 }
 
@@ -126,25 +287,16 @@ func (f *Fake) Plan(_ context.Context, req provider.PlanRequest) (provider.Plan,
 			return provider.Plan{}, err
 		}
 		return provider.Plan{
-			Actions: []provider.Action{{
-				Kind:       "create",
-				ResourceID: req.ResourceID,
-				Params:     params,
-			}},
+			Actions: []provider.Action{{Kind: "create", ResourceID: req.ResourceID, Params: params}},
 			Summary: []string{fmt.Sprintf("create machine %q (%s)", req.Desired.Name, spec.ServerType)},
 		}, nil
 	case req.Desired == nil && req.Observed != nil:
 		return provider.Plan{
-			Actions: []provider.Action{{
-				Kind:        "delete",
-				ResourceID:  req.ResourceID,
-				Ref:         &req.Observed.Ref,
-				Destructive: true,
-			}},
+			Actions: []provider.Action{{Kind: "delete", ResourceID: req.ResourceID, Ref: &req.Observed.Ref, Destructive: true}},
 			Summary: []string{fmt.Sprintf("delete machine %s", req.Observed.Ref.ID)},
 		}, nil
 	default:
-		return provider.Plan{}, nil // converged or nothing to do
+		return provider.Plan{}, nil
 	}
 }
 
@@ -157,6 +309,34 @@ type createParams struct {
 func (f *Fake) Apply(_ context.Context, action provider.Action) (provider.OperationRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ApplyCalls++
+	if err := f.runHooksLocked(BeforeApply, HookCtx{Action: &action}); err != nil {
+		return provider.OperationRef{}, err
+	}
+	if err := f.rateLimitedLocked(); err != nil {
+		return provider.OperationRef{}, err
+	}
+	// Consume a queued fault, if it applies to this action kind.
+	if len(f.applyFaults) > 0 && (f.applyFaults[0].kindOnly == "" || f.applyFaults[0].kindOnly == action.Kind) {
+		fault := f.applyFaults[0]
+		f.applyFaults = f.applyFaults[1:]
+		if fault.mutate {
+			_, _ = f.applyLocked(action) // mutation lands; response is lost
+		}
+		return provider.OperationRef{}, &provider.Error{
+			Class: fault.class, SideEffect: fault.effect,
+			Provider: f.instance, Message: fault.message, RetryAfter: fault.retryIn,
+		}
+	}
+	ref, err := f.applyLocked(action)
+	if err != nil {
+		return provider.OperationRef{}, err
+	}
+	_ = f.runHooksLocked(AfterAccept, HookCtx{Action: &action, OpRef: &ref})
+	return ref, nil
+}
+
+func (f *Fake) applyLocked(action provider.Action) (provider.OperationRef, error) {
 	switch action.Kind {
 	case "create":
 		var p createParams
@@ -182,8 +362,13 @@ func (f *Fake) Apply(_ context.Context, action provider.Action) (provider.Operat
 		for k, v := range p.Labels {
 			labels[k] = v
 		}
+		state, steps := "running", 0
+		if f.opt.CreateSteps > 0 {
+			state, steps = "creating", f.opt.CreateSteps
+		}
 		f.objects[id] = &object{
-			id: id, name: p.Name, state: "running", spec: p.Spec, labels: labels,
+			id: id, name: p.Name, state: state, stepsLeft: steps, listLag: f.opt.ListLagSteps,
+			spec: p.Spec, labels: labels,
 			capacity: provider.Capacity{compute.DimCPU: 2, compute.DimMemoryMiB: 4096},
 		}
 		return provider.OperationRef{ActionID: action.ActionID, Ref: &provider.ExternalRef{ID: id}}, nil
@@ -197,10 +382,14 @@ func (f *Fake) Apply(_ context.Context, action provider.Action) (provider.Operat
 		}
 		o, ok := f.objects[action.Ref.ID]
 		if !ok || o.state == "gone" {
-			// Delete of already-deleted is success (docs/03 §6 contract).
+			// Delete of already-deleted is success (docs/03 §6, FI-7).
 			return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref}, nil
 		}
-		o.state = "gone"
+		if f.opt.DeleteSteps > 0 {
+			o.state, o.stepsLeft = "deleting", f.opt.DeleteSteps
+		} else {
+			o.state = "gone"
+		}
 		return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref}, nil
 
 	default:
@@ -214,6 +403,13 @@ func (f *Fake) Apply(_ context.Context, action provider.Action) (provider.Operat
 func (f *Fake) ObserveOperation(_ context.Context, op provider.OperationRef) (provider.OperationStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ObserveCalls++
+	if err := f.runHooksLocked(BeforeObserve, HookCtx{OpRef: &op}); err != nil {
+		return provider.OperationStatus{}, err
+	}
+	if err := f.rateLimitedLocked(); err != nil {
+		return provider.OperationStatus{}, err
+	}
 	if op.Ref == nil {
 		return provider.OperationStatus{State: provider.OpUnknown}, nil
 	}
@@ -221,6 +417,23 @@ func (f *Fake) ObserveOperation(_ context.Context, op provider.OperationRef) (pr
 	if !ok || o.state == "gone" {
 		// For deletes this is success; the engine interprets by op kind.
 		return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref}, nil
+	}
+	// One observation = one async step.
+	switch o.state {
+	case "creating":
+		o.stepsLeft--
+		if o.stepsLeft <= 0 {
+			o.state = "running"
+		} else {
+			return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref}, nil
+		}
+	case "deleting":
+		o.stepsLeft--
+		if o.stepsLeft <= 0 {
+			o.state = "gone"
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref}, nil
+		}
+		return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref}, nil
 	}
 	obs := f.observeLocked(o)
 	return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
@@ -238,8 +451,15 @@ func (f *Fake) observeLocked(o *object) provider.ObservedResource {
 		labels[k] = v
 	}
 	ext, _ := json.Marshal(map[string]any{"fake": true, "name": o.name, "serverType": o.spec.ServerType})
-	ph := provider.PhaseRunning
-	if o.state == "gone" {
+	var ph provider.ObservedPhase
+	switch o.state {
+	case "creating":
+		ph = provider.PhasePending
+	case "running":
+		ph = provider.PhaseRunning
+	case "deleting":
+		ph = provider.PhaseDeleting
+	default:
 		ph = provider.PhaseGone
 	}
 	return provider.ObservedResource{

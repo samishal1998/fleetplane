@@ -40,7 +40,7 @@ func mustCreate(t *testing.T, f *Fake, resID, opID, ownerID string) provider.Ext
 }
 
 func TestCreateDiscoverOwnedOnly(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	ref := mustCreate(t, f, "res_1", "op_1", "owner-A")
 	mustCreate(t, f, "res_2", "op_2", "owner-B") // foreign control plane
 
@@ -65,7 +65,7 @@ func TestCreateDiscoverOwnedOnly(t *testing.T) {
 }
 
 func TestDiscoverByOpLabel(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	ref := mustCreate(t, f, "res_1", "op_dedup", "owner-A")
 	got, err := f.Discover(context.Background(), provider.DiscoverRequest{
 		Scope:    provider.ScopeOwned,
@@ -80,7 +80,7 @@ func TestDiscoverByOpLabel(t *testing.T) {
 }
 
 func TestApplySameActionIDTwiceOneResource(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	mustCreate(t, f, "res_1", "op_same", "owner-A")
 	// Re-apply the same create (journal replay after crash).
 	spec, _ := json.Marshal(compute.MachineSpec{ServerType: "cpx31", Image: "snapshot:ci=1"})
@@ -101,7 +101,7 @@ func TestApplySameActionIDTwiceOneResource(t *testing.T) {
 }
 
 func TestGetMissingIsErrNotFound(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	_, err := f.Get(context.Background(), provider.ExternalRef{ID: "999999"})
 	if !provider.IsClass(err, provider.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -109,7 +109,7 @@ func TestGetMissingIsErrNotFound(t *testing.T) {
 }
 
 func TestDeleteOfDeletedIsSuccess(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	ref := mustCreate(t, f, "res_1", "op_1", "owner-A")
 	del := provider.Action{ActionID: "op_d1", Kind: "delete", ResourceID: "res_1", Ref: &ref, Destructive: true}
 	if _, err := f.Apply(context.Background(), del); err != nil {
@@ -126,7 +126,7 @@ func TestDeleteOfDeletedIsSuccess(t *testing.T) {
 }
 
 func TestExtensionsPresent(t *testing.T) {
-	f := New("fake-1", "owner-A")
+	f := New("fake-1", "owner-A", Options{})
 	ref := mustCreate(t, f, "res_1", "op_1", "owner-A")
 	obs, err := f.Get(context.Background(), ref)
 	if err != nil {

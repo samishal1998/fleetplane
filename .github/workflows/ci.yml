@@ -60,8 +60,17 @@ jobs:
       - run: scripts/check-boundaries.sh --self-test
       - run: scripts/check-boundaries.sh
 
-  # Added in later increments (plan I5/I10/I13):
-  #   conformance  — full 03 §8 suite vs the fake provider
+  conformance:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -count=1 -run 'Conformance' ./providers/fake/...
+
+  # Added in later increments (plan I10/I13):
   #   preflight    — exposes has_token output (secrets unavailable in job-level if)
   #   e2e-hetzner  — env-gated, serialized, label-scoped sweeper (ADR-015)
   #   chaos        — nightly random failure-injection schedule
