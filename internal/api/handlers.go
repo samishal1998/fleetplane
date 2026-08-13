@@ -219,6 +219,22 @@ func toOpEnvelope(op *storage.Operation) apiclient.Operation {
 	return env
 }
 
+// resolveOperation thaws an uncertain operation (plan R23; ADR-API-001).
+func (s *Server) resolveOperation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"` // retry-verification | mark-failed
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, w.Header().Get("X-Request-Id"), http.StatusBadRequest, "invalid", "body: "+err.Error(), false)
+		return
+	}
+	if err := s.app.ResolveOperation(r.Context(), r.PathValue("id"), req.Action, principalOf(r).Name); err != nil {
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": r.PathValue("id"), "action": req.Action})
+}
+
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	f := storage.EventFilter{After: storage.EventID(r.URL.Query().Get("after"))}
 	if since := r.URL.Query().Get("since"); since != "" {

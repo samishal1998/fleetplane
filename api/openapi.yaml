@@ -144,6 +144,23 @@ paths:
       responses:
         "200": { description: Operation }
         default: { $ref: "#/components/responses/Error" }
+  /v1/operations/{id}:resolve:
+    post:
+      operationId: resolveOperation
+      summary: Resolve an uncertain operation (operator attestation)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [retry-verification, mark-failed] }
+      responses:
+        "202": { description: Resolution applied }
+        default: { $ref: "#/components/responses/Error" }
   /v1/events:
     get:
       operationId: listEvents

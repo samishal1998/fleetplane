@@ -13,8 +13,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/samimishal/fleetplane/internal/api"
 	"github.com/samimishal/fleetplane/internal/app"
@@ -192,8 +197,20 @@ func (a *App) Serve(ctx context.Context) error {
 	mainMux := http.NewServeMux()
 	mainMux.Handle("/health/", health)
 	mainMux.Handle("/v1/", a.mutationGate(a.api.Handler()))
+
+	// Ops listener (loopback by default): metrics, pprof, admin backup.
+	// Never expose it on an untrusted network (07 §7 runbook note).
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(app.NewFleetCollector(a.db, a.health))
+	reg.MustRegister(collectors.NewGoCollector())
 	opsMux := http.NewServeMux()
 	opsMux.Handle("/health/", health)
+	opsMux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	opsMux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	opsMux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	opsMux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	opsMux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	opsMux.HandleFunc("POST /admin/backup", a.handleBackup)
 
 	mainSrv := &http.Server{Handler: mainMux, BaseContext: func(net.Listener) context.Context { return ctx }}
 	opsSrv := &http.Server{Handler: opsMux, BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -259,6 +276,28 @@ func (a *App) close() error {
 		return err
 	}
 	return nil
+}
+
+// handleBackup runs VACUUM INTO on a dedicated connection (plan R23) —
+// kernel writes never queue behind it. `fleetplane admin backup` is its
+// HTTP client (ADR-006's documented exception, resolved: no direct DB).
+func (a *App) handleBackup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.To == "" {
+		writeJSON(w, http.StatusBadRequest,
+			map[string]any{"error": map[string]any{"code": "invalid", "message": `body must be {"to":"/abs/path.db"}`}})
+		return
+	}
+	if err := a.db.Backup(r.Context(), req.To); err != nil {
+		a.log.Error("backup failed", "to", req.To, "error", err)
+		writeJSON(w, http.StatusInternalServerError,
+			map[string]any{"error": map[string]any{"code": "internal", "message": err.Error()}})
+		return
+	}
+	a.log.Info("backup written", "to", req.To)
+	writeJSON(w, http.StatusOK, map[string]string{"to": req.To, "status": "ok"})
 }
 
 // mutationGate 503s mutating requests until recovery completes and during

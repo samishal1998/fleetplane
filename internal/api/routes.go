@@ -39,6 +39,7 @@ func (s *Server) Routes() []RouteDef {
 
 		{Method: "GET", Pattern: "/v1/operations", SpecPath: "/v1/operations", Perm: PermOperationRead, handler: s.listOperations},
 		{Method: "GET", Pattern: "/v1/operations/{id}", SpecPath: "/v1/operations/{id}", Perm: PermOperationRead, handler: s.getOperation},
+		{Method: "POST", Pattern: "/v1/operations/{idverb}", Verb: "resolve", SpecPath: "/v1/operations/{id}:resolve", Perm: PermProviderAdmin, Mutating: true, handler: s.resolveOperation},
 		{Method: "GET", Pattern: "/v1/events", SpecPath: "/v1/events", Perm: PermOperationRead, handler: s.listEvents},
 		{Method: "GET", Pattern: "/v1/providers", SpecPath: "/v1/providers", Perm: PermProviderRead, handler: s.listProviders},
 	}

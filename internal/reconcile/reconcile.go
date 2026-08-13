@@ -103,10 +103,13 @@ func New(st storage.Store, providers provision.Providers, engine Kicker, classes
 	}
 }
 
-// Kick marks one pool dirty (level-triggered, coalescing).
+// Kick marks one pool dirty (level-triggered, coalescing). A nil dirty map
+// means "everything is already dirty" (KickAll) — nothing to add.
 func (r *Reconciler) Kick(pool storage.PoolID) {
 	r.mu.Lock()
-	r.dirty[pool] = true
+	if r.dirty != nil {
+		r.dirty[pool] = true
+	}
 	r.mu.Unlock()
 	select {
 	case r.wake <- struct{}{}:

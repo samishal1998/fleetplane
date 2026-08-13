@@ -103,4 +103,15 @@ jobs:
         if: always()
         run: go run ./scripts/e2esweep
 
-  # Added at I13: nightly chaos job (random failure-injection schedule).
+  chaos:
+    needs: [test]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: chaos (fresh random seed each night; failures print the seed to replay)
+        run: FLEETPLANE_CHAOS=1 go test -count=10 -timeout 15m -run 'TestChaos' ./tests/...
