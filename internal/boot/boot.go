@@ -69,7 +69,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		return nil, err
 	}
 
-	engine := operations.New(db, providers, clock, log, operations.Config{}, operations.Hooks{})
+	engine := operations.New(db, providers, clock, log, operations.Config{
+		PollInterval: cfg.Engine.PollInterval.Std(),
+		VerifyWindow: cfg.Engine.VerifyWindow.Std(),
+	}, operations.Hooks{})
 	service := app.NewService(db, providers, engine, clock, log, ownerID)
 	a := &App{
 		cfg: cfg, log: log.With("owner_id", ownerID), db: db,

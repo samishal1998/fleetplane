@@ -223,7 +223,23 @@ func (c *checker) deleteOfDeleted(t *testing.T) {
 		}
 		t.Fatalf("delete of deleted: %v", err)
 	}
-	c.pollToSuccess(t, opRef)
+	// For delete operations, not_found while polling IS success.
+	for i := 0; i < c.h.MaxSteps; i++ {
+		status, err := c.driver.ObserveOperation(context.Background(), opRef)
+		if provider.IsClass(err, provider.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("ObserveOperation: %v", err)
+		}
+		if status.State == provider.OpSucceeded {
+			return
+		}
+		if status.State == provider.OpFailed {
+			t.Fatalf("delete of deleted failed: %v", status.Failure)
+		}
+	}
+	t.Fatalf("delete of deleted never terminal in %d observations", c.h.MaxSteps)
 }
 
 func (c *checker) opLabelDedup(t *testing.T) {

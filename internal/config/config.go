@@ -19,6 +19,13 @@ type Config struct {
 	Server    Server              `yaml:"server"`
 	Storage   Storage             `yaml:"storage"`
 	Providers map[string]Provider `yaml:"providers"`
+	Engine    Engine              `yaml:"engine"`
+}
+
+// Engine tunes the operation engine (ADR-014 defaults apply when zero).
+type Engine struct {
+	PollInterval Duration `yaml:"pollInterval"`
+	VerifyWindow Duration `yaml:"verifyWindow"` // uncertain-create resolution window (plan R10)
 }
 
 // Provider configures one provider instance (03 §4). Settings is the raw

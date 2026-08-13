@@ -296,8 +296,17 @@ func (e *Engine) poll(ctx context.Context, op *storage.Operation) error {
 
 	status, obsErr := driver.ObserveOperation(ctx, opRef)
 	if obsErr != nil {
-		if op.Kind == storage.OpKindDelete && provider.Classify(obsErr) == provider.ErrNotFound {
-			return e.succeedDelete(ctx, op, storage.OpExternalAccepted)
+		if provider.Classify(obsErr) == provider.ErrNotFound {
+			if op.Kind == storage.OpKindDelete {
+				return e.succeedDelete(ctx, op, storage.OpExternalAccepted)
+			}
+			// A create whose object vanished mid-poll: resolve via the
+			// verification procedure — never blind-succeed or blind-retry.
+			return e.st.Tx(ctx, func(tx storage.TxStore) error {
+				return tx.Operations().Transition(ctx, op.ID, storage.OpExternalAccepted, storage.OpVerifying, func(o *storage.Operation) {
+					o.NextAttemptAt = nil
+				})
+			})
 		}
 		return e.reschedule(ctx, op, obsErr)
 	}

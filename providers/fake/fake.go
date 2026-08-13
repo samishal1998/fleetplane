@@ -415,8 +415,9 @@ func (f *Fake) ObserveOperation(_ context.Context, op provider.OperationRef) (pr
 	}
 	o, ok := f.objects[op.Ref.ID]
 	if !ok || o.state == "gone" {
-		// For deletes this is success; the engine interprets by op kind.
-		return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref}, nil
+		// The object is gone: surface not_found and let the ENGINE
+		// interpret by op kind (delete → success; create → verify).
+		return provider.OperationStatus{}, f.notFound(op.Ref.ID)
 	}
 	// One observation = one async step.
 	switch o.state {
