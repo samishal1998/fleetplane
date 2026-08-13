@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/samimishal/fleetplane/internal/ids"
+	"github.com/samimishal/fleetplane/internal/lease"
 	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/phase"
 	"github.com/samimishal/fleetplane/internal/provision"
+	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk"
@@ -48,6 +50,9 @@ type Service struct {
 	clock     sdk.Clock
 	log       *slog.Logger
 	ownerID   string
+
+	sched  *scheduler.Scheduler
+	leases *lease.Manager
 }
 
 func NewService(st storage.Store, p *Providers, e *operations.Engine, clock sdk.Clock, log *slog.Logger, ownerID string) *Service {

@@ -103,6 +103,9 @@ func (rs resourceStore) List(ctx context.Context, f storage.ResourceFilter) ([]*
 	if f.PoolID != nil {
 		where, args = append(where, "pool_id=?"), append(args, string(*f.PoolID))
 	}
+	if f.Poolless {
+		where = append(where, "pool_id IS NULL")
+	}
 	if f.Class != "" {
 		where, args = append(where, "class=?"), append(args, f.Class)
 	}

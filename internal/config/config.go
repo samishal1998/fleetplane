@@ -22,6 +22,7 @@ type Config struct {
 	Classes   map[string]Class    `yaml:"classes"`
 	Engine    Engine              `yaml:"engine"`
 	Reconcile Reconcile           `yaml:"reconcile"`
+	Acquire   Acquire             `yaml:"acquire"`
 }
 
 // Class is a reusable creation template (04 §2). Spec may contain
@@ -42,6 +43,12 @@ type ClassReclaim struct {
 type Reconcile struct {
 	Interval             Duration `yaml:"interval"`
 	MaxMutationsPerCycle int      `yaml:"maxMutationsPerCycle"` // R22: the one budget knob
+}
+
+// Acquire tunes acquisition handling.
+type Acquire struct {
+	// PendingTimeout expires never-satisfied acquisitions (plan R6).
+	PendingTimeout Duration `yaml:"pendingTimeout"`
 }
 
 // Engine tunes the operation engine (ADR-014 defaults apply when zero).

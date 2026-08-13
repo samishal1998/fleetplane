@@ -169,7 +169,61 @@ func (r *Reconciler) Run(ctx context.Context) {
 				r.log.Error("reconcile pool", "pool_id", p.ID, "error", err)
 			}
 		}
+		if n, err := r.ReclaimPoolless(ctx); err != nil && ctx.Err() == nil {
+			r.log.Error("poolless reclaim", "error", err)
+		} else if n > 0 {
+			r.engine.Kick()
+		}
 	}
+}
+
+// ReclaimPoolless reclaims idle poolless resources whose CLASS declares an
+// idle policy (plan R21) — this is what makes the 08 §7 demo's "idle policy
+// eventually deletes" work without a pool. Returns deletes journaled.
+func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
+	list, err := r.st.Resources().List(ctx, storage.ResourceFilter{
+		Poolless:  true,
+		Phases:    []phase.Phase{phase.Ready, phase.Draining},
+		Ownership: []storage.Ownership{storage.OwnershipManaged},
+	})
+	if err != nil {
+		return 0, err
+	}
+	nowMs := r.clock.Now().UnixMilli()
+	budget := r.cfg.MaxMutationsPerCycle
+	n := 0
+	for _, res := range list {
+		if budget <= 0 {
+			break
+		}
+		if res.Phase == phase.Draining {
+			if err := r.journalDelete(ctx, res, nowMs); err == nil {
+				n++
+				budget--
+			}
+			continue
+		}
+		cls, ok := r.classes.Class(res.Class)
+		if !ok || cls.Reclaim == nil || cls.Reclaim.IdleAfter.Std() <= 0 {
+			continue // no policy = never auto-reclaimed
+		}
+		if res.DeleteProtected {
+			continue
+		}
+		if nowMs-idleSinceOf(res) < cls.Reclaim.IdleAfter.Std().Milliseconds() {
+			continue
+		}
+		if cnt, err := r.st.Leases().CountActive(ctx, res.ID); err != nil || cnt > 0 {
+			continue // invariant 3
+		}
+		if err := r.casPhase(ctx, res.ID, phase.Ready, phase.Draining, nowMs); err == nil {
+			if err := r.journalDelete(ctx, res, nowMs); err == nil {
+				n++
+				budget--
+			}
+		}
+	}
+	return n, nil
 }
 
 // Delta reports what one cycle decided.

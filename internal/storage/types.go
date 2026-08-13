@@ -126,9 +126,12 @@ type Resource struct {
 
 // ResourceFilter narrows List.
 type ResourceFilter struct {
-	Kind      string
-	Provider  ProviderInstance
-	PoolID    *PoolID
+	Kind     string
+	Provider ProviderInstance
+	PoolID   *PoolID
+	// Poolless selects resources with no pool (the class idle sweeper's
+	// universe, plan R21).
+	Poolless  bool
 	Class     string
 	Phases    []phase.Phase
 	Ownership []Ownership

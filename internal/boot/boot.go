@@ -13,12 +13,15 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/samimishal/fleetplane/internal/api"
 	"github.com/samimishal/fleetplane/internal/app"
 	"github.com/samimishal/fleetplane/internal/config"
+	"github.com/samimishal/fleetplane/internal/lease"
 	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/reconcile"
+	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
@@ -35,6 +38,8 @@ type App struct {
 	providers  *app.Providers
 	engine     *operations.Engine
 	reconciler *reconcile.Reconciler
+	sched      *scheduler.Scheduler
+	leases     *lease.Manager
 	service    *app.Service
 	api        *api.Server
 
@@ -94,12 +99,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		Interval:             cfg.Reconcile.Interval.Std(),
 		MaxMutationsPerCycle: cfg.Reconcile.MaxMutationsPerCycle,
 	})
-	engine.OnTerminal = reconciler.HandleOpTerminal
+	sched := scheduler.New(db, providers, engine, classes, clock, log, ownerID)
+	leases := lease.New(db, clock, log, reconciler)
+	engine.OnTerminal = func(op *storage.Operation) {
+		reconciler.HandleOpTerminal(op)
+		sched.HandleOpTerminal(op)
+	}
 
 	service := app.NewService(db, providers, engine, clock, log, ownerID)
+	service.AttachScheduling(sched, leases)
 	a := &App{
 		cfg: cfg, log: log.With("owner_id", ownerID), db: db,
-		providers: providers, engine: engine, reconciler: reconciler, service: service,
+		providers: providers, engine: engine, reconciler: reconciler,
+		sched: sched, leases: leases, service: service,
 		api: api.New(service, log),
 	}
 	return a, nil
@@ -149,6 +161,7 @@ func (a *App) Serve(ctx context.Context) error {
 	defer stopEngine()
 	go a.engine.Run(engineCtx)
 	go a.reconciler.Run(engineCtx)
+	go a.sweepLoop(engineCtx)
 
 	// Readiness = storage ping ∧ journal recovery complete (plan R11).
 	// Provider health never affects readiness (07 §8).
@@ -157,6 +170,10 @@ func (a *App) Serve(ctx context.Context) error {
 	} else if err := a.engine.Resume(ctx); err != nil {
 		a.log.Error("journal recovery failed; mutations stay gated", "error", err)
 	} else {
+		// Acquisition crash-resume (plan R6) runs with journal recovery.
+		if err := a.sched.Resume(ctx, a.pendingTimeoutMillis()); err != nil {
+			a.log.Error("acquisition resume", "error", err)
+		}
 		a.reconciler.KickAll()
 		a.ready.Store(true)
 		a.log.Info("fleetplane ready",
@@ -213,6 +230,35 @@ func (a *App) mutationGate(next http.Handler) http.Handler {
 
 // Service exposes the app facade (used by tests and later the CLI serve path).
 func (a *App) Service() *app.Service { return a.service }
+
+func (a *App) pendingTimeoutMillis() int64 {
+	t := a.cfg.Acquire.PendingTimeout.Std()
+	if t <= 0 {
+		t = 15 * time.Minute
+	}
+	return t.Milliseconds()
+}
+
+// sweepLoop runs the periodic level triggers that have no push signal:
+// lease TTL expiry and acquisition resume/expiry (plan R6).
+func (a *App) sweepLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+		if !a.ready.Load() {
+			continue
+		}
+		if _, err := a.leases.SweepExpired(ctx); err != nil && ctx.Err() == nil {
+			a.log.Error("lease sweep", "error", err)
+		}
+		if err := a.sched.Resume(ctx, a.pendingTimeoutMillis()); err != nil && ctx.Err() == nil {
+			a.log.Error("acquisition sweep", "error", err)
+		}
+	}
+}
 
 func (a *App) healthHandler() http.Handler {
 	mux := http.NewServeMux()

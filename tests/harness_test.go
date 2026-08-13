@@ -13,10 +13,13 @@ import (
 
 	"github.com/samimishal/fleetplane/internal/app"
 	"github.com/samimishal/fleetplane/internal/ids"
+	"github.com/samimishal/fleetplane/internal/lease"
 	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/reconcile"
+	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
+	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
 	"github.com/samimishal/fleetplane/providers/fake"
 )
@@ -58,6 +61,8 @@ type Harness struct {
 	Fake      *fake.Fake
 	Engine    *operations.Engine
 	Rec       *reconcile.Reconciler
+	Sched     *scheduler.Scheduler
+	Leases    *lease.Manager
 	Svc       *app.Service
 	Clock     *stepClock
 	Hooks     operations.Hooks
@@ -102,13 +107,58 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 	h.Providers = providers
 	h.Fake = inst.(*fake.Fake)
 	h.Engine = operations.New(st, providers, h.Clock, log, h.EngineCfg, h.Hooks)
-	classes := app.Classes{"ci": reconcile.Class{
-		Kind: "compute.machine", Provider: "fake-local",
-		Spec: json.RawMessage(machineSpec),
-	}}
+	classes := app.Classes{
+		"ci": reconcile.Class{
+			Kind: "compute.machine", Provider: "fake-local",
+			Spec: json.RawMessage(machineSpec),
+		},
+		"ci-reclaim": reconcile.Class{
+			Kind: "compute.machine", Provider: "fake-local",
+			Spec:    json.RawMessage(machineSpec),
+			Reclaim: &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(10 * time.Minute)},
+		},
+	}
 	h.Rec = reconcile.New(st, providers, h.Engine, classes, h.Clock, log, ownerID, reconcile.Config{})
-	h.Engine.OnTerminal = h.Rec.HandleOpTerminal
+	h.Sched = scheduler.New(st, providers, h.Engine, classes, h.Clock, log, ownerID)
+	h.Leases = lease.New(st, h.Clock, log, h.Rec)
+	h.Engine.OnTerminal = func(op *storage.Operation) {
+		h.Rec.HandleOpTerminal(op)
+		h.Sched.HandleOpTerminal(op)
+	}
 	h.Svc = app.NewService(st, providers, h.Engine, h.Clock, log, ownerID)
+	h.Svc.AttachScheduling(h.Sched, h.Leases)
+}
+
+// Acquire submits an acquisition through the service and returns its ID.
+func (h *Harness) Acquire(cmd app.AcquireCmd) storage.AcquisitionID {
+	h.t.Helper()
+	if cmd.Actor == "" {
+		cmd.Actor = "test"
+	}
+	if cmd.BuildResponse == nil {
+		cmd.BuildResponse = func(a *storage.Acquisition) (int, json.RawMessage) {
+			b, _ := json.Marshal(map[string]string{"id": string(a.ID), "state": string(a.State)})
+			return 201, b
+		}
+	}
+	out, err := h.Svc.Acquire(context.Background(), cmd)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var body struct{ ID string }
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		h.t.Fatal(err)
+	}
+	return storage.AcquisitionID(body.ID)
+}
+
+func (h *Harness) acq(id storage.AcquisitionID) *storage.Acquisition {
+	h.t.Helper()
+	a, err := h.St.Acquisitions().Get(context.Background(), id)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return a
 }
 
 // CreatePool upserts a pool spec and returns its ID.
