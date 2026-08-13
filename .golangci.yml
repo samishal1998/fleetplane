@@ -1,0 +1,45 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - depguard
+    - misspell
+  settings:
+    depguard:
+      rules:
+        # ADR-009: the orchestration kernel never sees providers or cloud SDKs.
+        kernel-purity:
+          files:
+            - "**/internal/**"
+            - "**/pkg/kinds/**"
+          listMode: lax
+          deny:
+            - pkg: github.com/samimishal/fleetplane/providers
+              desc: kernel never imports providers (02_ARCHITECTURE - Layers)
+            - pkg: github.com/hetznercloud/hcloud-go
+              desc: cloud SDKs forbidden in kernel
+            - pkg: github.com/aws/aws-sdk-go
+              desc: cloud SDKs forbidden in kernel
+            - pkg: google.golang.org/api
+              desc: cloud SDKs forbidden in kernel
+            - pkg: github.com/google/go-github
+              desc: no GitHub semantics in kernel (01_PRD non-goals)
+        # Providers see only pkg/sdk + pkg/kinds (+ their own cloud SDK).
+        provider-isolation:
+          files:
+            - "**/providers/**"
+          listMode: lax
+          deny:
+            - pkg: github.com/samimishal/fleetplane/internal
+              desc: providers see only pkg/sdk and pkg/kinds
+        # pkg/sdk is a leaf; it must never grow dependencies on the app.
+        sdk-hygiene:
+          files:
+            - "**/pkg/sdk/**"
+          listMode: lax
+          deny:
+            - pkg: github.com/samimishal/fleetplane/internal
+              desc: SDK is a leaf package
+            - pkg: github.com/samimishal/fleetplane/providers
+              desc: SDK is a leaf package

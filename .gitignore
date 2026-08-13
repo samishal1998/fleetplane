@@ -1,0 +1,7 @@
+/bin/
+/fleetplane
+*.db
+*.db-wal
+*.db-shm
+cover.out
+dist/
