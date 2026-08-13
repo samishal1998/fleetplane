@@ -4,4 +4,5 @@ package main
 // remove a provider from a distribution — never a central switch statement.
 import (
 	_ "github.com/samimishal/fleetplane/providers/fake"
+	_ "github.com/samimishal/fleetplane/providers/hetzner"
 )

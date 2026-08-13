@@ -24,6 +24,7 @@ import (
 
 	"github.com/samimishal/fleetplane/internal/phase"
 	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk"
 	"github.com/samimishal/fleetplane/pkg/sdk/provider"
 )
@@ -316,6 +317,14 @@ func (e *Engine) poll(ctx context.Context, op *storage.Operation) error {
 		if op.Kind == storage.OpKindDelete {
 			return e.succeedDelete(ctx, op, storage.OpExternalAccepted)
 		}
+		// Workload readiness gate (plan R16, 08 §4): provider success
+		// alone doesn't make a machine ready when a probe is declared.
+		switch ready, gateErr := e.readinessGate(ctx, op, status); {
+		case gateErr != nil:
+			return e.failOp(ctx, op.ID, storage.OpExternalAccepted, gateErr)
+		case !ready:
+			return e.reschedule(ctx, op, nil)
+		}
 		return e.succeedCreate(ctx, op, status)
 	case provider.OpFailed:
 		var cause error = status.Failure
@@ -386,6 +395,39 @@ func (e *Engine) succeedDelete(ctx context.Context, op *storage.Operation, from 
 	}
 	e.notifyTerminal(ctx, op.ID)
 	return nil
+}
+
+// readinessGate runs one TCP probe attempt per poll cycle when the machine
+// spec declares readiness (plan R16). Budget exhaustion (measured from the
+// operation's creation) fails the resource.
+func (e *Engine) readinessGate(ctx context.Context, op *storage.Operation, status provider.OperationStatus) (bool, error) {
+	if op.ResourceID == nil {
+		return true, nil
+	}
+	res, err := e.st.Resources().Get(ctx, *op.ResourceID)
+	if err != nil {
+		return true, nil // no record to gate on
+	}
+	spec, err := compute.ParseSpec(res.Spec)
+	if err != nil || spec.Readiness == nil || spec.Readiness.TCP == nil {
+		return true, nil // not a probed compute spec
+	}
+	budget := spec.Readiness.Budget.Std()
+	if budget <= 0 {
+		budget = compute.DefaultProbeBudget
+	}
+	if e.clock.Now().UnixMilli()-op.CreatedAt > budget.Milliseconds() {
+		return false, fmt.Errorf("readiness probe budget (%s) exhausted", budget)
+	}
+	var addrs []provider.Address
+	if status.Resource != nil {
+		addrs = status.Resource.Addresses
+	}
+	if probeErr := compute.ProbeOnce(ctx, addrs, spec.Readiness); probeErr != nil {
+		e.log.Info("readiness probe not passing yet", "operation_id", op.ID, "error", probeErr)
+		return false, nil
+	}
+	return true, nil
 }
 
 // --- verify: the invariant-7 resolution procedure (plan R10) ---

@@ -70,7 +70,37 @@ jobs:
           go-version-file: go.mod
       - run: go test -race -count=1 -run 'Conformance' ./providers/fake/...
 
-  # Added in later increments (plan I10/I13):
-  #   preflight    — exposes has_token output (secrets unavailable in job-level if)
-  #   e2e-hetzner  — env-gated, serialized, label-scoped sweeper (ADR-015)
-  #   chaos        — nightly random failure-injection schedule
+  # secrets context is unavailable in job-level `if`; a step exports it.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+    steps:
+      - id: check
+        run: echo "has_token=${{ secrets.HETZNER_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+  e2e-hetzner:
+    needs: [preflight, test, conformance]
+    # Never fork PRs; main pushes, nightly and manual runs only (ADR-015).
+    if: >
+      needs.preflight.outputs.has_token == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: hetzner-e2e
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+      FLEETPLANE_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 -timeout 25m -run 'TestE2E_' ./tests/...
+      - name: sweep test servers (always)
+        if: always()
+        run: go run ./scripts/e2esweep
+
+  # Added at I13: nightly chaos job (random failure-injection schedule).
