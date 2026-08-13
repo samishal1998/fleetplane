@@ -1,5 +1,4 @@
-# Minimal Fleetplane configuration (grows with each increment; unknown
-# fields are rejected at boot — ADR-007).
+# Fleetplane configuration (unknown fields are rejected at boot — ADR-007).
 server:
   addr: ":8080"
   opsAddr: "127.0.0.1:9090"
@@ -7,3 +6,42 @@ server:
 
 storage:
   path: /var/lib/fleetplane/fleetplane.db
+
+# Credentials are ALWAYS secret:// references (07 §4).
+providers:
+  hetzner-main:
+    driver: hetzner
+    settings:
+      token: secret://env/HETZNER_TOKEN
+      location: fsn1
+
+# Classes are reusable creation templates (04 §2). reclaim.idleAfter makes
+# idle poolless machines created from the class get deleted automatically.
+classes:
+  ci-large:
+    kind: compute.machine
+    provider: hetzner-main
+    spec:
+      serverType: cpx31
+      image: "snapshot:ci-runner=v12"
+      location: fsn1
+    reclaim:
+      idleAfter: 5m
+
+# Static API tokens (generate with: fleetplane token new --name ci --perm resource.acquire ...)
+auth:
+  tokens: []
+  # - id: 8f3a1c2d
+  #   name: ci
+  #   sha256: "<64 hex chars>"
+  #   permissions: [resource.read, resource.acquire, operation.read]
+
+engine:
+  verifyWindow: 120s
+
+reconcile:
+  interval: 15s
+  maxMutationsPerCycle: 5
+
+acquire:
+  pendingTimeout: 15m

@@ -56,7 +56,9 @@ func Execute(version string) int {
 	cmd.PersistentFlags().StringVar(&r.token, "token", os.Getenv("FLEETPLANE_TOKEN"), "API token (env FLEETPLANE_TOKEN)")
 	cmd.PersistentFlags().StringVarP(&r.output, "output", "o", "table", "output format: table|json")
 
-	cmd.AddCommand(versionCmd(version), serveCmd(), resourcesCmd(r))
+	cmd.AddCommand(versionCmd(version), serveCmd(), resourcesCmd(r),
+		acquireCmd(r), releaseCmd(r), watchCmd(r),
+		poolsCmd(r), operationsCmd(r), eventsCmd(r), providersCmd(r), tokenCmd())
 
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "fleetplane:", err)
@@ -66,6 +68,10 @@ func Execute(version string) int {
 }
 
 func exitCode(err error) int {
+	var wf *watchFailed
+	if errors.As(err, &wf) {
+		return ExitWatch
+	}
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
 		switch {

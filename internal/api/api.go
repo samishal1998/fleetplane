@@ -1,5 +1,6 @@
-// Package api serves the Fleetplane HTTP API (04 §3). Handlers call only
-// app.Service; auth/authz middleware and the full route table land at I9.
+// Package api serves the Fleetplane HTTP API (04 §3 + ADR-API-001). A
+// single RouteDef table (routes.go) drives the mux, per-route permissions
+// and the OpenAPI contract test. Handlers call only app.Service.
 package api
 
 import (
@@ -9,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,38 +21,22 @@ import (
 )
 
 type Server struct {
-	app *app.Service
-	log *slog.Logger
+	app    *app.Service
+	auth   *TokenAuthenticator
+	health HealthSource
+	log    *slog.Logger
 }
 
-func New(a *app.Service, log *slog.Logger) *Server { return &Server{app: a, log: log} }
-
-// Handler returns the API routes, ready to mount on the main listener.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/resources", s.withRecovery(s.createResource))
-	mux.HandleFunc("GET /v1/resources", s.withRecovery(s.listResources))
-	mux.HandleFunc("GET /v1/resources/{id}", s.withRecovery(s.getResource))
-	mux.HandleFunc("DELETE /v1/resources/{id}", s.withRecovery(s.deleteResource))
-	return mux
+// HealthSource surfaces provider health (07 §8: NEVER via readiness).
+type HealthSource interface {
+	Snapshot() []app.ProviderHealth
 }
 
-func (s *Server) withRecovery(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get("X-Request-Id")
-		if reqID == "" {
-			reqID = "req_" + randHex(8)
-		}
-		w.Header().Set("X-Request-Id", reqID)
-		defer func() {
-			if p := recover(); p != nil {
-				s.log.Error("panic in handler", "panic", fmt.Sprint(p), "request_id", reqID)
-				writeError(w, reqID, http.StatusInternalServerError, "internal", "internal error", false)
-			}
-		}()
-		h(w, r)
-	}
+func New(a *app.Service, auth *TokenAuthenticator, health HealthSource, log *slog.Logger) *Server {
+	return &Server{app: a, auth: auth, health: health, log: log}
 }
+
+// --- resource handlers ---
 
 func (s *Server) createResource(w http.ResponseWriter, r *http.Request) {
 	reqID := w.Header().Get("X-Request-Id")
@@ -69,10 +53,8 @@ func (s *Server) createResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	actor := actorOf(r)
-	idemKey := r.Header.Get("Idempotency-Key")
+	actor := principalOf(r).Name
 	sum := sha256.Sum256(body)
-
 	out, err := s.app.CreateResource(r.Context(), app.CreateResourceCmd{
 		Kind:     req.Spec.Kind,
 		Provider: req.Spec.Provider,
@@ -81,7 +63,7 @@ func (s *Server) createResource(w http.ResponseWriter, r *http.Request) {
 		Labels:   req.Metadata.Labels,
 
 		Actor:       actor,
-		IdemKey:     idemKey,
+		IdemKey:     r.Header.Get("Idempotency-Key"),
 		IdemScope:   "POST /v1/resources|" + actor,
 		RequestHash: hex.EncodeToString(sum[:]),
 
@@ -128,14 +110,12 @@ func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteResource(w http.ResponseWriter, r *http.Request) {
 	reqID := w.Header().Get("X-Request-Id")
-	actor := actorOf(r)
-	idemKey := r.Header.Get("Idempotency-Key")
+	actor := principalOf(r).Name
 	id := r.PathValue("id")
 	sum := sha256.Sum256([]byte("DELETE /v1/resources/" + id))
-
 	out, err := s.app.DeleteResource(r.Context(), app.DeleteResourceCmd{
 		ID: id, Actor: actor,
-		IdemKey: idemKey, IdemScope: "DELETE /v1/resources|" + actor,
+		IdemKey: r.Header.Get("Idempotency-Key"), IdemScope: "DELETE /v1/resources|" + actor,
 		RequestHash: hex.EncodeToString(sum[:]),
 		BuildResponse: func(res *storage.Resource) (int, json.RawMessage) {
 			b, _ := json.Marshal(map[string]string{"id": string(res.ID), "status": "deleting"})
@@ -147,6 +127,14 @@ func (s *Server) deleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOutcome(w, out)
+}
+
+func (s *Server) drainResource(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.DrainResource(r.Context(), r.PathValue("id"), principalOf(r).Name); err != nil {
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": r.PathValue("id"), "status": "draining"})
 }
 
 // --- serialization ---
@@ -227,8 +215,6 @@ func writeErrorDetails(w http.ResponseWriter, reqID string, code int, errCode, m
 		Code: errCode, Message: msg, RequestID: reqID, Retryable: retryable, Details: details,
 	}})
 }
-
-func actorOf(*http.Request) string { return "-" } // token auth lands at I9
 
 func randHex(n int) string {
 	b := make([]byte, n)

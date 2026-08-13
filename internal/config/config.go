@@ -23,6 +23,20 @@ type Config struct {
 	Engine    Engine              `yaml:"engine"`
 	Reconcile Reconcile           `yaml:"reconcile"`
 	Acquire   Acquire             `yaml:"acquire"`
+	Auth      Auth                `yaml:"auth"`
+}
+
+// Auth holds static API tokens (07 §2, ADR-008). With no tokens configured
+// the API runs OPEN — local development only; boot logs a loud warning.
+type Auth struct {
+	Tokens []Token `yaml:"tokens"`
+}
+
+type Token struct {
+	ID          string   `yaml:"id"`     // 8-hex lookup prefix
+	Name        string   `yaml:"name"`   // shown in audit events
+	SHA256      string   `yaml:"sha256"` // hex of sha256(secret)
+	Permissions []string `yaml:"permissions"`
 }
 
 // Class is a reusable creation template (04 §2). Spec may contain
@@ -144,6 +158,19 @@ func (c *Config) validate() error {
 		if _, ok := c.Providers[cls.Provider]; !ok {
 			return fmt.Errorf("classes.%s references unknown provider %q", name, cls.Provider)
 		}
+	}
+	seen := map[string]bool{}
+	for i, tok := range c.Auth.Tokens {
+		if tok.ID == "" || tok.SHA256 == "" {
+			return fmt.Errorf("auth.tokens[%d] needs id and sha256", i)
+		}
+		if len(tok.SHA256) != 64 {
+			return fmt.Errorf("auth.tokens[%d].sha256 must be 64 hex chars", i)
+		}
+		if seen[tok.ID] {
+			return fmt.Errorf("auth.tokens: duplicate id %q", tok.ID)
+		}
+		seen[tok.ID] = true
 	}
 	return nil
 }

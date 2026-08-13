@@ -1,0 +1,299 @@
+openapi: 3.0.3
+info:
+  title: Fleetplane API
+  description: >
+    Agentless control plane for infrastructure fleets (fleetplane.io/v1alpha1).
+    Every mutating request accepts an Idempotency-Key header; completed keys
+    replay their stored response byte-identically.
+  version: v1alpha1
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+paths:
+  /v1/acquisitions:
+    post:
+      operationId: createAcquisition
+      summary: Acquire capacity (find or create, 04 §4)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcquireRequest" }
+      responses:
+        "201": { description: Acquisition accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Acquisition" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/acquisitions/{id}:
+    get:
+      operationId: getAcquisition
+      summary: Read one acquisition
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Acquisition, content: { application/json: { schema: { $ref: "#/components/schemas/Acquisition" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: releaseAcquisition
+      summary: Release an acquisition (retry-safe)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Released }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources:
+    post:
+      operationId: createResource
+      summary: Create a resource directly
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateResourceRequest" }
+      responses:
+        "201": { description: Resource journaled, content: { application/json: { schema: { $ref: "#/components/schemas/Resource" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listResources
+      summary: List resources
+      parameters:
+        - { name: kind, in: query, schema: { type: string } }
+        - { name: class, in: query, schema: { type: string } }
+        - { name: provider, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Resources, content: { application/json: { schema: { $ref: "#/components/schemas/ResourceList" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:
+    get:
+      operationId: getResource
+      summary: Read one resource
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Resource, content: { application/json: { schema: { $ref: "#/components/schemas/Resource" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteResource
+      summary: Delete a resource (refused while leased/protected/unowned)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: Deleting }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:drain:
+    post:
+      operationId: drainResource
+      summary: Drain a resource (04 §3)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: Draining }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/pools:
+    post:
+      operationId: createPool
+      summary: Create or update a pool by name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PoolManifest" }
+      responses:
+        "200": { description: Pool, content: { application/json: { schema: { $ref: "#/components/schemas/Pool" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listPools
+      summary: List pools
+      responses:
+        "200": { description: Pools, content: { application/json: { schema: { $ref: "#/components/schemas/PoolList" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/pools/{id}:
+    get:
+      operationId: getPool
+      summary: Read one pool
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Pool, content: { application/json: { schema: { $ref: "#/components/schemas/Pool" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updatePool
+      summary: Update a pool
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PoolManifest" }
+      responses:
+        "200": { description: Pool, content: { application/json: { schema: { $ref: "#/components/schemas/Pool" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/pools/{id}:reconcile:
+    post:
+      operationId: reconcilePool
+      summary: Trigger reconciliation (04 §3)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: Reconciling }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/operations:
+    get:
+      operationId: listOperations
+      summary: List open operations
+      responses:
+        "200": { description: Operations }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/operations/{id}:
+    get:
+      operationId: getOperation
+      summary: Read one operation
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Operation }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/events:
+    get:
+      operationId: listEvents
+      summary: List audit events (cursor = evt_ id)
+      parameters:
+        - { name: after, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, example: "1h" } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        "200": { description: Events }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/providers:
+    get:
+      operationId: listProviders
+      summary: Provider instance health (07 §8 — never part of readiness)
+      responses:
+        "200": { description: Providers }
+        default: { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, description: "flp_<id>.<secret> (ADR-008)" }
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: string } }
+  responses:
+    Error:
+      description: Error envelope (single shape for every non-2xx)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+  schemas:
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+            retryable: { type: boolean }
+            retryAfterSeconds: { type: integer }
+            details: { type: object }
+    Metadata:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        ownership: { type: string, enum: [managed, adopted, observed] }
+        protected: { type: boolean }
+        generation: { type: integer }
+        observedGeneration: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: string, format: date-time, nullable: true }
+    Resource:
+      type: object
+      required: [apiVersion, kind, metadata, spec]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+        spec:
+          type: object
+          properties:
+            kind: { type: string }
+            provider: { type: string }
+            class: { type: string }
+            machine: { type: object }
+        status:
+          type: object
+          properties:
+            phase: { type: string, enum: [unknown, provisioning, ready, allocated, draining, deleting, failed, orphaned] }
+            externalId: { type: string }
+            externalRef: { type: object }
+            capacity: { type: object }
+            extensions: { type: object, description: "provider-native, passed through untouched (invariant 6)" }
+    ResourceList:
+      type: object
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/Resource" } }
+    CreateResourceRequest:
+      type: object
+      required: [spec]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+        spec:
+          type: object
+          required: [kind, provider]
+          properties:
+            kind: { type: string }
+            provider: { type: string }
+            machine: { type: object }
+    AcquireRequest:
+      type: object
+      properties:
+        kind: { type: string }
+        class: { type: string }
+        quantity: { type: integer, default: 1 }
+        constraints:
+          type: object
+          additionalProperties:
+            type: object
+            properties: { min: { type: integer } }
+        exclusive: { type: boolean }
+        lease:
+          type: object
+          properties: { ttl: { type: string, example: "90m" } }
+        idempotencyKey: { type: string }
+    Acquisition:
+      type: object
+      required: [id, state]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        id: { type: string }
+        state: { type: string, enum: [pending, provisioning, bound, failed, released, expired] }
+        class: { type: string }
+        resourceKind: { type: string }
+        resourceId: { type: string }
+        leaseId: { type: string }
+        actor: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    PoolManifest:
+      type: object
+      required: [spec]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+        spec: { type: object, description: "reconcile.PoolSpec: class|kind+provider+machine, replicas, minReady, maxResources, reclaim.idleAfter" }
+    Pool:
+      type: object
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+        spec: { type: object }
+        paused: { type: boolean }
+    PoolList:
+      type: object
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/Pool" } }

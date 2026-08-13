@@ -6,6 +6,7 @@ package boot
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ type App struct {
 	reconciler *reconcile.Reconciler
 	sched      *scheduler.Scheduler
 	leases     *lease.Manager
+	health     *app.HealthTracker
 	service    *app.Service
 	api        *api.Server
 
@@ -108,13 +110,43 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 
 	service := app.NewService(db, providers, engine, clock, log, ownerID)
 	service.AttachScheduling(sched, leases)
+	service.AttachReconciler(reconciler)
+
+	auth, err := buildAuth(cfg)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !auth.Enabled() {
+		log.Warn("NO API TOKENS CONFIGURED — the API is open; use auth.tokens in production (07 §2)")
+	}
+	health := app.NewHealthTracker(providers, clock, app.HealthConfig{})
+
 	a := &App{
 		cfg: cfg, log: log.With("owner_id", ownerID), db: db,
 		providers: providers, engine: engine, reconciler: reconciler,
-		sched: sched, leases: leases, service: service,
-		api: api.New(service, log),
+		sched: sched, leases: leases, service: service, health: health,
+		api: api.New(service, auth, health, log),
 	}
 	return a, nil
+}
+
+func buildAuth(cfg *config.Config) (*api.TokenAuthenticator, error) {
+	var records []api.TokenRecord
+	for i, tok := range cfg.Auth.Tokens {
+		perms, err := api.NewPermSet(tok.Permissions)
+		if err != nil {
+			return nil, fmt.Errorf("auth.tokens[%d]: %w", i, err)
+		}
+		digest, err := hex.DecodeString(tok.SHA256)
+		if err != nil || len(digest) != 32 {
+			return nil, fmt.Errorf("auth.tokens[%d].sha256: not 32 hex-encoded bytes", i)
+		}
+		rec := api.TokenRecord{ID: tok.ID, Name: tok.Name, Perms: perms}
+		copy(rec.SHA256[:], digest)
+		records = append(records, rec)
+	}
+	return api.NewTokenAuthenticator(records), nil
 }
 
 // Listen binds the main and ops listeners; addresses are readable via
@@ -162,6 +194,7 @@ func (a *App) Serve(ctx context.Context) error {
 	go a.engine.Run(engineCtx)
 	go a.reconciler.Run(engineCtx)
 	go a.sweepLoop(engineCtx)
+	go a.health.Run(engineCtx)
 
 	// Readiness = storage ping ∧ journal recovery complete (plan R11).
 	// Provider health never affects readiness (07 §8).

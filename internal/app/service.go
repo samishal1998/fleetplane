@@ -13,6 +13,7 @@ import (
 	"github.com/samimishal/fleetplane/internal/operations"
 	"github.com/samimishal/fleetplane/internal/phase"
 	"github.com/samimishal/fleetplane/internal/provision"
+	"github.com/samimishal/fleetplane/internal/reconcile"
 	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
@@ -53,6 +54,7 @@ type Service struct {
 
 	sched  *scheduler.Scheduler
 	leases *lease.Manager
+	rec    *reconcile.Reconciler
 }
 
 func NewService(st storage.Store, p *Providers, e *operations.Engine, clock sdk.Clock, log *slog.Logger, ownerID string) *Service {

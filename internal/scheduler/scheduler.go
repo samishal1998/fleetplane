@@ -45,6 +45,9 @@ func New(st storage.Store, providers provision.Providers, engine Kicker,
 		clock: clock, log: log, ownerID: ownerID}
 }
 
+// Classes exposes the class resolver (shared with pool validation).
+func (s *Scheduler) Classes() reconcile.ClassResolver { return s.classes }
+
 // Satisfy tries to bind a pending acquisition: reuse existing capacity
 // first (05 §3), otherwise plan a scale-on-demand create (05 §5).
 func (s *Scheduler) Satisfy(ctx context.Context, acqID storage.AcquisitionID) (*storage.Acquisition, error) {

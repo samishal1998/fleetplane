@@ -87,7 +87,20 @@ func resourcesCmd(r *root) *cobra.Command {
 	create.Flags().StringVar(&createIdemKey, "idempotency-key", "", "idempotency key")
 	_ = create.MarkFlagRequired("file")
 
-	cmd.AddCommand(get, del, create)
+	drain := &cobra.Command{
+		Use:   "drain ID",
+		Short: "Drain a resource: no new leases; deleted once existing leases end",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := r.client().DrainResource(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: draining\n", args[0])
+			return nil
+		},
+	}
+
+	cmd.AddCommand(get, del, create, drain)
 	return cmd
 }
 
