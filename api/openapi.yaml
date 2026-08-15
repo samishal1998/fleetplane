@@ -83,6 +83,51 @@ paths:
       responses:
         "202": { description: Draining }
         default: { $ref: "#/components/responses/Error" }
+  /v1/classes:
+    post:
+      operationId: createClass
+      summary: Create a class (template validated against the kind registry)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClassManifest" }
+      responses:
+        "201": { description: Class, content: { application/json: { schema: { $ref: "#/components/schemas/Class" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listClasses
+      summary: List classes (config-sourced and api-sourced)
+      responses:
+        "200": { description: Classes, content: { application/json: { schema: { $ref: "#/components/schemas/ClassList" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/classes/{name}:
+    get:
+      operationId: getClass
+      summary: Read one class
+      parameters: [{ $ref: "#/components/parameters/className" }]
+      responses:
+        "200": { description: Class, content: { application/json: { schema: { $ref: "#/components/schemas/Class" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateClass
+      summary: Create or update an api-managed class (config-owned classes are 409)
+      parameters: [{ $ref: "#/components/parameters/className" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClassManifest" }
+      responses:
+        "200": { description: Class, content: { application/json: { schema: { $ref: "#/components/schemas/Class" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteClass
+      summary: Delete an api-managed class (409 while a pool references it)
+      parameters: [{ $ref: "#/components/parameters/className" }]
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/pools:
     post:
       operationId: createPool
@@ -184,6 +229,7 @@ components:
     bearerAuth: { type: http, scheme: bearer, description: "flp_<id>.<secret> (ADR-008)" }
   parameters:
     id: { name: id, in: path, required: true, schema: { type: string } }
+    className: { name: name, in: path, required: true, schema: { type: string } }
   responses:
     Error:
       description: Error envelope (single shape for every non-2xx)
@@ -300,6 +346,49 @@ components:
         queueDeadline: { type: string, format: date-time, description: "createdAt + maxWait; after this the acquisition scales up" }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    ClassManifest:
+      type: object
+      required: [spec]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata:
+          type: object
+          properties: { name: { type: string } }
+        spec: { $ref: "#/components/schemas/ClassSpec" }
+    ClassSpec:
+      type: object
+      required: [kind, provider, template]
+      properties:
+        kind: { type: string, example: compute.machine }
+        provider: { type: string, description: provider instance name }
+        template: { type: object, description: "kind-specific spec, validated at write time" }
+        reclaim:
+          type: object
+          properties: { idleAfter: { type: string, example: "5m" } }
+        scheduling:
+          type: object
+          properties:
+            queue:
+              type: object
+              properties: { maxWait: { type: string, example: "10m" } }
+    Class:
+      type: object
+      required: [metadata, spec, source]
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+        spec: { $ref: "#/components/schemas/ClassSpec" }
+        source: { type: string, enum: [config, api], description: config-sourced classes are read-only via the API }
+    ClassList:
+      type: object
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Class" }
     PoolManifest:
       type: object
       required: [spec]

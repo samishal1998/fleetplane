@@ -33,6 +33,7 @@ type stores struct{ q queryer }
 func (s stores) Providers() storage.ProviderInstanceStore { return providerStore(s) }
 func (s stores) Resources() storage.ResourceStore         { return resourceStore(s) }
 func (s stores) Pools() storage.PoolStore                 { return poolStore(s) }
+func (s stores) Classes() storage.ClassStore              { return classStore(s) }
 func (s stores) Acquisitions() storage.AcquisitionStore   { return acquisitionStore(s) }
 func (s stores) Leases() storage.LeaseStore               { return leaseStore(s) }
 func (s stores) Operations() storage.OperationStore       { return operationStore(s) }

@@ -156,6 +156,7 @@
           overview: 'overview-view',
           resources: r.id ? 'resource-detail' : 'resources-view',
           pools: r.id ? 'pool-detail' : 'pools-view',
+          classes: 'classes-view',
           acquisitions: r.id ? 'acq-detail' : 'acqs-view',
           operations: 'ops-view',
           events: 'events-view',
@@ -168,6 +169,7 @@
           { key: 'overview', label: 'Overview', icon: '◈' },
           { key: 'resources', label: 'Resources', icon: '▣', count: this.store.counts.resources },
           { key: 'pools', label: 'Pools', icon: '⬡' },
+          { key: 'classes', label: 'Classes', icon: '▤' },
           { key: 'acquisitions', label: 'Acquisitions', icon: '⇋' },
           { key: 'operations', label: 'Operations', icon: '≣', alert: this.store.counts.uncertain },
           { key: 'events', label: 'Events', icon: '☰' },
@@ -220,7 +222,7 @@
           <span aria-hidden="true">{{ it.icon }}</span> {{ it.label }}
           <span v-if="it.count !== undefined && it.count !== null" class="n-count">{{ it.count }}</span>
           <span v-if="it.alert" class="n-alert badge" :style="{color: 'var(--st-serious)', borderColor: 'var(--st-serious)'}"
-                title="uncertain operations">⚠ {{ it.alert }}</span>
+                title="Uncertain operations">⚠ {{ it.alert }}</span>
         </button>
         <div class="spacer"></div>
         <div class="foot">
@@ -380,7 +382,7 @@
         <div class="tile" :class="{alert: uncertainOps.length > 0}">
           <div class="t-label">{{ uncertainOps.length ? '⚠ Uncertain operations' : 'Uncertain operations' }}</div>
           <div class="t-value">{{ uncertainOps.length }}</div>
-          <div v-if="uncertainOps.length" class="t-sub"><a href="#/operations">resolve →</a></div></div>
+          <div v-if="uncertainOps.length" class="t-sub"><a href="#/operations">Resolve →</a></div></div>
         <div class="tile"><div class="t-label">Pools</div><div class="t-value">{{ pools.length }}</div></div>
         <div class="tile"><div class="t-label">Providers healthy</div><div class="t-value">{{ healthyProviders }}<span class="muted">/{{ providers.length }}</span></div></div>
       </div>
@@ -777,8 +779,8 @@
       <template v-else-if="p">
         <div class="tiles">
           <div class="tile"><div class="t-label">Desired replicas</div><div class="t-value">{{ spec.replicas || 0 }}</div>
-            <div class="btn-row mt"><button class="btn sm" @click="scale(-1)" :disabled="busy || !spec.replicas">−</button>
-              <button class="btn sm" @click="scale(1)" :disabled="busy">+</button></div></div>
+            <div class="t-actions btn-row"><button class="btn sm" @click="scale(-1)" :disabled="busy || !spec.replicas" aria-label="Scale down">−</button>
+              <button class="btn sm" @click="scale(1)" :disabled="busy" aria-label="Scale up">+</button></div></div>
           <div class="tile"><div class="t-label">In class</div><div class="t-value">{{ members.length }}</div>
             <div class="t-sub">{{ spec.class ? 'class ' + spec.class : 'inline spec' }}</div></div>
           <div class="tile"><div class="t-label">Paused</div><div class="t-value">{{ p.paused ? 'yes' : 'no' }}</div></div>
@@ -821,13 +823,17 @@
     mixins: [polls],
     data() {
       return {
-        acqs: [], lookup: '', showAcquire: false, busy: false, formErr: '',
+        acqs: [], lookup: '', classNames: [], showAcquire: false, busy: false, formErr: '',
         form: { class: '', kind: '', exclusive: false, ttl: '', maxWait: '', constraints: '' },
         idem: uuid(),
       };
     },
     methods: {
       async load() {
+        try {
+          const cl = await api('GET', '/v1/classes');
+          this.classNames = (cl.items || []).map((c) => c.metadata.name);
+        } catch (e) { /* datalist is best-effort */ }
         const ids = rememberedAcqs();
         const out = [];
         for (const id of ids.slice(0, 20)) {
@@ -889,7 +895,8 @@
       <modal-box v-if="showAcquire" title="Acquire capacity" @close="showAcquire = false">
         <form @submit.prevent="acquire">
           <label class="f" for="a-class">Class</label>
-          <input id="a-class" type="text" v-model="form.class" placeholder="ci" required>
+          <input id="a-class" type="text" v-model="form.class" placeholder="ci" list="class-names" required>
+          <datalist id="class-names"><option v-for="c in classNames" :key="c" :value="c"></option></datalist>
           <label class="f" for="a-ttl">Lease TTL (optional)</label>
           <input id="a-ttl" type="text" v-model="form.ttl" placeholder="90m">
           <label class="f" for="a-wait">Max wait (optional)</label>
@@ -957,6 +964,135 @@
     </div>`,
   });
 
+  // ------------------------------------------------------------------ classes
+
+  const CLASS_TMPL = MACHINE_TMPL;
+
+  app.component('classes-view', {
+    mixins: [polls],
+    data() {
+      return {
+        items: [], providers: [], detail: null, showCreate: false, busy: false, formErr: '',
+        form: { name: '', kind: 'compute.machine', provider: '', template: CLASS_TMPL, reclaim: '', maxWait: '' },
+      };
+    },
+    watch: {
+      'form.kind'(k) {
+        if (this.form.template === MACHINE_TMPL || this.form.template === VOLUME_TMPL || !this.form.template.trim()) {
+          this.form.template = k === 'storage.volume' ? VOLUME_TMPL : MACHINE_TMPL;
+        }
+      },
+    },
+    methods: {
+      reclaimOf(c) { return (c.spec.reclaim && c.spec.reclaim.idleAfter) || '—'; },
+      queueOf(c) { return (c.spec.scheduling && c.spec.scheduling.queue && c.spec.scheduling.queue.maxWait) || '—'; },
+      async load() {
+        try {
+          const d = await api('GET', '/v1/classes');
+          this.items = d.items || [];
+          this.err = '';
+        } catch (e) { this.err = loadErr(e); }
+        try {
+          const p = await api('GET', '/v1/providers');
+          this.providers = p.items || [];
+          if (!this.form.provider && this.providers.length) this.form.provider = this.providers[0].instance;
+        } catch (e) { /* provider dropdown degrades to free text */ }
+        this.loading = false;
+      },
+      openCreate() { this.showCreate = true; this.formErr = ''; },
+      async create() {
+        this.formErr = '';
+        let template;
+        try { template = JSON.parse(this.form.template); } catch (e) { this.formErr = 'Template: ' + e.message; return; }
+        const body = {
+          apiVersion: 'fleetplane.io/v1alpha1', kind: 'Class',
+          metadata: { name: this.form.name },
+          spec: { kind: this.form.kind, provider: this.form.provider, template: template },
+        };
+        if (this.form.reclaim) body.spec.reclaim = { idleAfter: this.form.reclaim };
+        if (this.form.maxWait) body.spec.scheduling = { queue: { maxWait: this.form.maxWait } };
+        this.busy = true;
+        try {
+          const cls = await api('POST', '/v1/classes', body);
+          toast('Class ' + cls.metadata.name + ' created');
+          this.showCreate = false;
+          this.load(true);
+        } catch (e) { this.formErr = e.message; } finally { this.busy = false; }
+      },
+      async remove(c) {
+        this.busy = true;
+        try {
+          await api('DELETE', '/v1/classes/' + encodeURIComponent(c.metadata.name));
+          toast('Class ' + c.metadata.name + ' deleted');
+          this.detail = null;
+          this.load(true);
+        } catch (e) { toastErr(e); } finally { this.busy = false; }
+      },
+    },
+    template: `
+    <div>
+      <div class="topbar"><h1>Classes</h1>
+        <span class="muted small">Creation templates — config-file classes are read-only here</span>
+        <div class="grow"></div>
+        <button class="btn primary" @click="openCreate">New class</button></div>
+      <div class="card">
+        <div v-if="err" class="err-inline">{{ err }}</div>
+        <div v-else-if="!items.length && !loading" class="empty">No classes defined. Create one here or in config.yaml.</div>
+        <div v-else class="tbl-wrap"><table class="tbl">
+          <thead><tr><th>Name</th><th>Kind</th><th>Provider</th><th>Source</th><th>Idle reclaim</th><th>Queue budget</th><th></th></tr></thead>
+          <tbody><tr v-for="c in items" :key="c.metadata.name" class="rowlink" @click="detail = c">
+            <td><strong>{{ c.metadata.name }}</strong></td>
+            <td>{{ c.spec.kind }}</td>
+            <td>{{ c.spec.provider }}</td>
+            <td><span class="badge"><span class="dot" :style="{background: c.source === 'config' ? 'var(--muted)' : 'var(--accent)'}"></span>{{ c.source }}</span></td>
+            <td>{{ reclaimOf(c) }}</td>
+            <td>{{ queueOf(c) }}</td>
+            <td><button v-if="c.source === 'api'" class="btn sm danger" @click.stop="remove(c)" :disabled="busy">Delete</button></td>
+          </tr></tbody></table></div>
+      </div>
+
+      <modal-box v-if="detail" :title="'Class ' + detail.metadata.name" @close="detail = null">
+        <dl class="kv" style="grid-template-columns: 130px 1fr">
+          <dt>Kind</dt><dd>{{ detail.spec.kind }}</dd>
+          <dt>Provider</dt><dd>{{ detail.spec.provider }}</dd>
+          <dt>Source</dt><dd>{{ detail.source }}<span v-if="detail.source === 'config'" class="muted small"> (edit config.yaml and restart to change)</span></dd>
+          <dt>Idle reclaim</dt><dd>{{ reclaimOf(detail) }}</dd>
+          <dt>Queue budget</dt><dd>{{ queueOf(detail) }}</dd>
+        </dl>
+        <h3 class="mt" style="font-size:13px">Template</h3>
+        <json-view :value="detail.spec.template"></json-view>
+      </modal-box>
+
+      <modal-box v-if="showCreate" title="New class" @close="showCreate = false">
+        <form @submit.prevent="create">
+          <label class="f" for="c-name">Name</label>
+          <input id="c-name" type="text" v-model="form.name" placeholder="ci-large" required>
+          <label class="f" for="c-kind">Kind</label>
+          <select id="c-kind" v-model="form.kind">
+            <option>compute.machine</option><option>storage.volume</option>
+          </select>
+          <label class="f" for="c-prov">Provider instance</label>
+          <select v-if="providers.length" id="c-prov" v-model="form.provider">
+            <option v-for="p in providers" :key="p.instance" :value="p.instance">{{ p.instance }} ({{ p.driver }})</option>
+          </select>
+          <input v-else id="c-prov" type="text" v-model="form.provider" placeholder="hetzner">
+          <label class="f" for="c-tpl">Template (JSON)</label>
+          <textarea id="c-tpl" v-model="form.template" spellcheck="false"></textarea>
+          <div class="hint">Validated against the kind registry when you submit — a bad template never reaches provisioning.</div>
+          <label class="f" for="c-reclaim">Idle reclaim (optional)</label>
+          <input id="c-reclaim" type="text" v-model="form.reclaim" placeholder="5m">
+          <label class="f" for="c-wait">Queue budget (optional)</label>
+          <input id="c-wait" type="text" v-model="form.maxWait" placeholder="10m">
+          <div v-if="formErr" class="field-err">{{ formErr }}</div>
+          <div class="actions">
+            <button type="button" class="btn" @click="showCreate = false">Cancel</button>
+            <button type="submit" class="btn primary" :disabled="busy"><span v-if="busy" class="wip"></span> Create</button>
+          </div>
+        </form>
+      </modal-box>
+    </div>`,
+  });
+
   // ------------------------------------------------------------------ operations
 
   app.component('ops-view', {
@@ -991,7 +1127,7 @@
     template: `
     <div>
       <div class="topbar"><h1>Operations</h1>
-        <span class="muted small">open operations — terminal ones are visible in events</span>
+        <span class="muted small">Open operations — completed ones appear in events</span>
         <div class="grow"></div>
         <div class="pill-select" role="group" aria-label="Filter">
           <button v-for="f in ['all', 'verifying', 'uncertain']" :key="f"

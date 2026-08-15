@@ -59,6 +59,14 @@ There is deliberately **no `deleted` phase**. Deletion terminality is a storage 
 
 ## Classes
 
+Classes can be defined two ways: statically in `config.yaml` (loaded at
+boot, config-authoritative) or dynamically through `POST /v1/classes`, the
+`fleetplane classes` CLI, `apply -f` Class manifests, or the dashboard.
+Both kinds live in the same registry; config-defined classes show
+`source: config` and are read-only through the API, while api-managed
+classes take effect immediately — no restart. Templates are validated
+against the kind registry at definition time.
+
 A class is a creation template: everything needed to make a new resource of some kind at some provider. Classes live in the server config:
 
 ```yaml

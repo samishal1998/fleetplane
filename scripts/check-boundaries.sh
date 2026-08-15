@@ -7,7 +7,7 @@
 set -euo pipefail
 
 M=github.com/samishal1998/fleetplane
-FORBIDDEN_IN_KERNEL="$M/providers|hetznercloud|aws-sdk-go|google.golang.org/api|go-github"
+FORBIDDEN_IN_KERNEL="$M/providers|hetznercloud|digitalocean/godo|aws-sdk-go|google.golang.org/api|go-github"
 
 fail=0
 

@@ -21,6 +21,8 @@ const (
 	PermResourceDelete  Permission = "resource.delete"
 	PermPoolRead        Permission = "pool.read"
 	PermPoolWrite       Permission = "pool.write"
+	PermClassRead       Permission = "class.read"
+	PermClassWrite      Permission = "class.write"
 	PermProviderRead    Permission = "provider.read"
 	PermProviderAdmin   Permission = "provider.admin"
 	PermOperationRead   Permission = "operation.read"
@@ -30,7 +32,7 @@ const (
 // AllPermissions is the closed set config validation checks against.
 var AllPermissions = []Permission{
 	PermResourceRead, PermResourceAcquire, PermResourceCreate, PermResourceDelete,
-	PermPoolRead, PermPoolWrite, PermProviderRead, PermProviderAdmin,
+	PermPoolRead, PermPoolWrite, PermClassRead, PermClassWrite, PermProviderRead, PermProviderAdmin,
 	PermOperationRead, PermAdmin,
 }
 

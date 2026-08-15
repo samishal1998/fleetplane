@@ -217,6 +217,22 @@ type Acquisition struct {
 	UpdatedAt int64
 }
 
+// ClassRecord is a stored class template (04 §2): config-seeded rows are
+// authoritative from the config file; api rows are managed via /v1/classes.
+type ClassRecord struct {
+	Name     string
+	Kind     string
+	Provider ProviderInstance
+	Spec     json.RawMessage
+
+	ReclaimIdleAfterMs *int64
+	QueueMaxWaitMs     *int64
+
+	Source    string // "config" | "api"
+	CreatedAt int64
+	UpdatedAt int64
+}
+
 // Pool is a desired-capacity spec (04 §5).
 type Pool struct {
 	ID                 PoolID

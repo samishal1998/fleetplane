@@ -40,6 +40,7 @@ requires `provider.admin`.
 | Resource detail | Metadata, spec, capacity, provider extensions (verbatim, invariant 6), open operations, events | Drain, delete (dry-run preview first, then journaled delete) |
 | Pools | Declared pools with class, replicas, minReady | Create pool |
 | Pool detail | Spec, generation, resources in the pool's class | Scale replicas (±), edit spec JSON, reconcile now |
+| Classes | All classes (config + api) with kind, provider, source, policies | Create class (template validated on submit), delete api-managed classes, view template |
 | Acquisitions | Acquisitions created from this browser (the API has no list endpoint), lookup by ID | Acquire (class, TTL, constraints, exclusive), release |
 | Operations | **Open** (non-terminal) operations; terminal ones are visible in events | Resolve uncertain operations (`retry-verification` / `mark-failed`) |
 | Events | Recent events, newest first, free-text filter | — |

@@ -135,8 +135,14 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 			QueueMaxWait: 10 * time.Minute,
 		},
 	}
-	h.Rec = reconcile.New(st, providers, h.Engine, classes, h.Clock, log, ownerID, reconcile.Config{})
-	h.Sched = scheduler.New(st, providers, h.Engine, classes, h.Clock, log, ownerID)
+	// Production parity: classes are seeded into storage and resolved
+	// through the store-backed registry (dynamic classes).
+	if err := app.SeedConfigClasses(ctx, st, classes, h.Clock.Now().UnixMilli()); err != nil {
+		h.t.Fatal(err)
+	}
+	classReg := app.NewClassRegistry(st, log)
+	h.Rec = reconcile.New(st, providers, h.Engine, classReg, h.Clock, log, ownerID, reconcile.Config{})
+	h.Sched = scheduler.New(st, providers, h.Engine, classReg, h.Clock, log, ownerID)
 	h.Leases = lease.New(st, h.Clock, log, h.Rec)
 	h.Engine.OnTerminal = func(op *storage.Operation) {
 		h.Rec.HandleOpTerminal(op)

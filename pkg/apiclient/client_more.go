@@ -113,3 +113,41 @@ func (c *Client) ListProviders(ctx context.Context) ([]ProviderHealth, error) {
 	}
 	return out.Items, nil
 }
+
+// --- classes (dynamic classes) ---
+
+func (c *Client) CreateClass(ctx context.Context, m ClassManifest) (*Class, error) {
+	var out Class
+	if err := c.do(ctx, http.MethodPost, "/v1/classes", m, "", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) UpsertClass(ctx context.Context, name string, m ClassManifest) (*Class, error) {
+	var out Class
+	if err := c.do(ctx, http.MethodPut, "/v1/classes/"+url.PathEscape(name), m, "", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetClass(ctx context.Context, name string) (*Class, error) {
+	var out Class
+	if err := c.do(ctx, http.MethodGet, "/v1/classes/"+url.PathEscape(name), nil, "", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ListClasses(ctx context.Context) ([]Class, error) {
+	var out ClassList
+	if err := c.do(ctx, http.MethodGet, "/v1/classes", nil, "", &out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+func (c *Client) DeleteClass(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/classes/"+url.PathEscape(name), nil, "", nil)
+}

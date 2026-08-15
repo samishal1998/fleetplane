@@ -394,6 +394,52 @@ fleetplane pools reconcile pool_01J8FYKN9Q2T5V8X1C4E7H0KSD
 pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: reconciling
 ```
 
+## fleetplane classes
+
+List and manage resource classes. Config-file classes appear with source
+`config` and are read-only here; API-managed classes carry source `api`.
+
+```bash
+fleetplane classes
+```
+
+```text
+NAME      KIND             PROVIDER      SOURCE  RECLAIM  QUEUE
+ci-large  compute.machine  hetzner-main  config  5m0s     -
+burst     compute.machine  hetzner-main  api     5m0s     10m0s
+```
+
+### fleetplane classes create
+
+```bash
+fleetplane classes create burst \
+  --provider hetzner-main \
+  --template '{"serverType":"cpx31","image":"snapshot:ci-runner=v12"}' \
+  --reclaim-idle-after 5m --queue-max-wait 10m
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--kind` | `compute.machine` | Resource kind |
+| `--provider` | — | Provider instance name (required) |
+| `--template` | — | Kind-specific spec as inline JSON |
+| `--template-file` | — | Kind-specific spec from a JSON file |
+| `--reclaim-idle-after` | — | Idle reclamation policy, e.g. `5m` |
+| `--queue-max-wait` | — | Acquisition queue budget, e.g. `10m` |
+
+The template is validated against the kind registry at write time.
+
+### fleetplane classes get / delete
+
+```bash
+fleetplane classes get burst      # JSON envelope
+fleetplane classes delete burst   # refused (409) while a pool references it
+```
+
+Classes can also be applied declaratively — `fleetplane apply -f` accepts
+`kind: Class` manifests (upsert by name); put Class documents before the
+Pool documents that reference them.
+
 ## fleetplane operations
 
 List open (non-terminal) operations, or show one as JSON.

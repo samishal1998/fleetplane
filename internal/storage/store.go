@@ -42,6 +42,7 @@ type TxStore interface {
 	Providers() ProviderInstanceStore
 	Resources() ResourceStore
 	Pools() PoolStore
+	Classes() ClassStore
 	Acquisitions() AcquisitionStore
 	Leases() LeaseStore
 	Operations() OperationStore
@@ -96,6 +97,16 @@ type ResourceStore interface {
 }
 
 // PoolStore persists pool specs and reconciler checkpoints.
+// ClassStore persists class templates (dynamic classes).
+type ClassStore interface {
+	Upsert(ctx context.Context, c *ClassRecord) error
+	Get(ctx context.Context, name string) (*ClassRecord, error)
+	List(ctx context.Context) ([]*ClassRecord, error)
+	Delete(ctx context.Context, name string) error
+	// ListBySource powers boot seeding (stale config rows are pruned).
+	ListBySource(ctx context.Context, source string) ([]*ClassRecord, error)
+}
+
 type PoolStore interface {
 	Upsert(ctx context.Context, p *Pool) error
 	Get(ctx context.Context, id PoolID) (*Pool, error)

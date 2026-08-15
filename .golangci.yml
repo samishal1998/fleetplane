@@ -24,6 +24,8 @@ linters:
               desc: kernel never imports providers (02_ARCHITECTURE - Layers)
             - pkg: github.com/hetznercloud/hcloud-go
               desc: cloud SDKs forbidden in kernel
+            - pkg: github.com/digitalocean/godo
+              desc: cloud SDKs forbidden in kernel
             - pkg: github.com/aws/aws-sdk-go
               desc: cloud SDKs forbidden in kernel
             - pkg: google.golang.org/api

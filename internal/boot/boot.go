@@ -32,8 +32,10 @@ import (
 	"github.com/samishal1998/fleetplane/internal/storage"
 	"github.com/samishal1998/fleetplane/internal/storage/sqlite"
 	"github.com/samishal1998/fleetplane/internal/webui"
+	"github.com/samishal1998/fleetplane/pkg/kinds"
 	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
 	"github.com/samishal1998/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
 )
 
@@ -111,6 +113,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 			_ = db.Close()
 			return nil, fmt.Errorf("classes.%s: %w", name, err)
 		}
+		if err := kinds.Validate(provider.ResourceKind(cls.Kind), specJSON); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("classes.%s: %w", name, err)
+		}
 		rc := reconcile.Class{Kind: cls.Kind, Provider: cls.Provider, Spec: specJSON}
 		if cls.Reclaim != nil {
 			rc.Reclaim = &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(cls.Reclaim.IdleAfter.Std())}
@@ -120,11 +126,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		}
 		classes[name] = rc
 	}
-	reconciler := reconcile.New(db, providers, engine, classes, clock, log, ownerID, reconcile.Config{
+	// Dynamic classes: config classes seed storage (config-authoritative,
+	// stale rows pruned); the store-backed registry resolves live so API
+	// classes and policy edits apply without special-casing.
+	if err := app.SeedConfigClasses(ctx, db, classes, clock.Now().UnixMilli()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("seeding config classes: %w", err)
+	}
+	classReg := app.NewClassRegistry(db, log)
+	reconciler := reconcile.New(db, providers, engine, classReg, clock, log, ownerID, reconcile.Config{
 		Interval:             cfg.Reconcile.Interval.Std(),
 		MaxMutationsPerCycle: cfg.Reconcile.MaxMutationsPerCycle,
 	})
-	sched := scheduler.New(db, providers, engine, classes, clock, log, ownerID)
+	sched := scheduler.New(db, providers, engine, classReg, clock, log, ownerID)
 	leases := lease.New(db, clock, log, reconciler)
 	costs := app.NewCostObserver(db, providers)
 	engine.OnTerminal = func(op *storage.Operation) {

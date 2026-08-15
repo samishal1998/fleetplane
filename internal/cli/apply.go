@@ -98,6 +98,18 @@ func applyOne(cmd *cobra.Command, r *root, m manifest) error {
 		return fmt.Errorf("unsupported apiVersion %q (want %s)", m.APIVersion, apiclient.APIVersion)
 	}
 	switch m.Kind {
+	case "Class":
+		var cm apiclient.ClassManifest
+		if err := json.Unmarshal(m.Raw, &cm); err != nil {
+			return err
+		}
+		// Class applies are declarative upserts keyed by name.
+		cls, err := r.client().UpsertClass(cmd.Context(), cm.Metadata.Name, cm)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "class/%s: applied\n", cls.Metadata.Name)
+		return nil
 	case "Pool":
 		var pm apiclient.PoolManifest
 		if err := json.Unmarshal(m.Raw, &pm); err != nil {
@@ -124,6 +136,6 @@ func applyOne(cmd *cobra.Command, r *root, m manifest) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "resource/%s (%s): %s\n", res.Metadata.Name, res.Metadata.ID, res.Status.Phase)
 		return nil
 	default:
-		return fmt.Errorf("unsupported manifest kind %q (want Pool or Resource)", m.Kind)
+		return fmt.Errorf("unsupported manifest kind %q (want Class, Pool or Resource)", m.Kind)
 	}
 }

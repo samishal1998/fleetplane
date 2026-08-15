@@ -58,6 +58,8 @@ Each route requires exactly one permission (see the route table below). The clos
 | `resource.delete` | Delete and drain resources |
 | `pool.read` | Read pools |
 | `pool.write` | Create, update, reconcile pools |
+| `class.read` | Read classes |
+| `class.write` | Create, update, delete classes |
 | `provider.read` | Read provider health |
 | `provider.admin` | Resolve uncertain operations |
 | `operation.read` | Read operations and events |
@@ -77,6 +79,11 @@ The server is driven by a single route table that also drives per-route authoriz
 | GET | `/v1/resources/{id}` | `resource.read` | no |
 | DELETE | `/v1/resources/{id}` | `resource.delete` | yes |
 | POST | `/v1/resources/{id}:drain` | `resource.delete` | yes |
+| POST | `/v1/classes` | `class.write` | yes |
+| GET | `/v1/classes` | `class.read` | no |
+| GET | `/v1/classes/{name}` | `class.read` | no |
+| PUT | `/v1/classes/{name}` | `class.write` | yes |
+| DELETE | `/v1/classes/{name}` | `class.write` | yes |
 | POST | `/v1/pools` | `pool.write` | yes |
 | GET | `/v1/pools` | `pool.read` | no |
 | GET | `/v1/pools/{id}` | `pool.read` | no |
@@ -89,6 +96,35 @@ The server is driven by a single route table that also drives per-route authoriz
 | GET | `/v1/providers` | `provider.read` | no |
 
 The read endpoints beyond the original design (acquisition get, pool reads, operation list, providers, `:resolve`) are documented in [ADR-API-001](../adr/ADR-API-001-read-endpoints.md).
+
+### Classes
+
+Classes are dynamic: `POST /v1/classes` creates one (the `template` is
+validated against the kind registry at write time, so a bad template never
+reaches provisioning), `PUT` upserts by name, `DELETE` removes it. Two
+gates return `409`: classes defined in the config file are **config-owned**
+(`source: "config"`, code `config_owned` — edit `config.yaml` and restart to
+change them), and a class referenced by any pool cannot be deleted. The
+manifest shape:
+
+```json
+{
+  "apiVersion": "fleetplane.io/v1alpha1",
+  "kind": "Class",
+  "metadata": { "name": "ci-large" },
+  "spec": {
+    "kind": "compute.machine",
+    "provider": "hetzner-main",
+    "template": { "serverType": "cpx31", "image": "snapshot:ci-runner=v12" },
+    "reclaim": { "idleAfter": "5m" },
+    "scheduling": { "queue": { "maxWait": "10m" } }
+  }
+}
+```
+
+The envelope adds `source` (`config` | `api`). Policy fields (`reclaim`,
+`scheduling.queue`) apply live — the reconciler and scheduler resolve
+classes by name on every pass.
 
 ## Envelopes
 

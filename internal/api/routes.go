@@ -37,6 +37,12 @@ func (s *Server) Routes() []RouteDef {
 		{Method: "PUT", Pattern: "/v1/pools/{id}", SpecPath: "/v1/pools/{id}", Perm: PermPoolWrite, Mutating: true, handler: s.updatePool},
 		{Method: "POST", Pattern: "/v1/pools/{idverb}", Verb: "reconcile", SpecPath: "/v1/pools/{id}:reconcile", Perm: PermPoolWrite, Mutating: true, handler: s.reconcilePool},
 
+		{Method: "POST", Pattern: "/v1/classes", SpecPath: "/v1/classes", Perm: PermClassWrite, Mutating: true, handler: s.createClass},
+		{Method: "GET", Pattern: "/v1/classes", SpecPath: "/v1/classes", Perm: PermClassRead, handler: s.listClasses},
+		{Method: "GET", Pattern: "/v1/classes/{name}", SpecPath: "/v1/classes/{name}", Perm: PermClassRead, handler: s.getClass},
+		{Method: "PUT", Pattern: "/v1/classes/{name}", SpecPath: "/v1/classes/{name}", Perm: PermClassWrite, Mutating: true, handler: s.updateClass},
+		{Method: "DELETE", Pattern: "/v1/classes/{name}", SpecPath: "/v1/classes/{name}", Perm: PermClassWrite, Mutating: true, handler: s.deleteClass},
+
 		{Method: "GET", Pattern: "/v1/operations", SpecPath: "/v1/operations", Perm: PermOperationRead, handler: s.listOperations},
 		{Method: "GET", Pattern: "/v1/operations/{id}", SpecPath: "/v1/operations/{id}", Perm: PermOperationRead, handler: s.getOperation},
 		{Method: "POST", Pattern: "/v1/operations/{idverb}", Verb: "resolve", SpecPath: "/v1/operations/{id}:resolve", Perm: PermProviderAdmin, Mutating: true, handler: s.resolveOperation},

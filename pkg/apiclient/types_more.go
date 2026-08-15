@@ -90,3 +90,49 @@ type Event struct {
 	ResourceID  string    `json:"resourceId,omitempty"`
 	OperationID string    `json:"operationId,omitempty"`
 }
+
+// ClassSpec is the class template payload (04 §2, dynamic classes).
+type ClassSpec struct {
+	Kind     string          `json:"kind"`     // resource kind, e.g. compute.machine
+	Provider string          `json:"provider"` // provider instance name
+	Template json.RawMessage `json:"template"` // kind-specific spec
+	Reclaim  *ClassReclaim   `json:"reclaim,omitempty"`
+	// Scheduling holds the class's cost/latency tradeoff (docs/11 §8).
+	Scheduling *ClassScheduling `json:"scheduling,omitempty"`
+}
+
+type ClassReclaim struct {
+	IdleAfter string `json:"idleAfter,omitempty"` // Go duration, e.g. "5m"
+}
+
+type ClassScheduling struct {
+	Queue *ClassQueue `json:"queue,omitempty"`
+}
+
+type ClassQueue struct {
+	MaxWait string `json:"maxWait,omitempty"` // Go duration, e.g. "10m"
+}
+
+// ClassManifest is the POST/PUT /v1/classes body.
+type ClassManifest struct {
+	APIVersion string    `json:"apiVersion,omitempty"`
+	Kind       string    `json:"kind,omitempty"` // "Class"
+	Metadata   Metadata  `json:"metadata,omitzero"`
+	Spec       ClassSpec `json:"spec"`
+}
+
+// Class is the class envelope. Source is "config" (file-owned, read-only
+// via the API) or "api".
+type Class struct {
+	APIVersion string    `json:"apiVersion"`
+	Kind       string    `json:"kind"` // "Class"
+	Metadata   Metadata  `json:"metadata"`
+	Spec       ClassSpec `json:"spec"`
+	Source     string    `json:"source"`
+}
+
+type ClassList struct {
+	APIVersion string  `json:"apiVersion"`
+	Kind       string  `json:"kind"`
+	Items      []Class `json:"items"`
+}
