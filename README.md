@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" width="112" alt="Fleetplane logo">
+</p>
+
 # Fleetplane
 
 **An agentless control plane for VM fleets, shipped as a single static binary.**
