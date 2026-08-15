@@ -1,0 +1,79 @@
+name: release
+
+# Builds release binaries (pure Go, CGO off — single static binary per
+# platform) and publishes them with checksums on the GitHub release.
+# Triggered by tag pushes; workflow_dispatch rebuilds an existing tag
+# (e.g. a tag pushed before this workflow existed).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, e.g. v0.4.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS="${target%/*}"; GOARCH="${target#*/}"
+            export GOOS GOARCH
+            out="dist/fleetplane_${TAG}_${GOOS}_${GOARCH}"
+            mkdir -p "$out"
+            go build -trimpath -ldflags "-s -w -X main.version=${TAG}" \
+              -o "$out/fleetplane" ./cmd/fleetplane
+            cp README.md SETUP_GUIDE.md "$out/"
+            tar -C "$out" -czf "$out.tar.gz" fleetplane README.md SETUP_GUIDE.md
+            rm -r "$out"
+          done
+          (cd dist && sha256sum ./*.tar.gz | sed 's|\./||' > checksums.txt)
+          cat dist/checksums.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/checksums.txt \
+              --repo "$GITHUB_REPOSITORY" --title "Fleetplane $TAG" \
+              --generate-notes --verify-tag
+          fi

@@ -6,7 +6,23 @@ Related reading: [configuration reference](docs/guides/configuration.md), [CLI r
 
 ## 1. Install
 
-### Option A: `go install`
+### Option A: install script (Linux / macOS)
+
+Downloads the latest release binary for your platform, verifies its
+checksum, and installs it (no Go toolchain needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/samishal1998/fleetplane/main/install.sh | sh
+```
+
+The script installs to `/usr/local/bin` when writable, else `~/.local/bin`.
+Overrides: `FLEETPLANE_VERSION=v0.4.0` pins a release,
+`FLEETPLANE_INSTALL_DIR=/some/bin` picks the directory. The script itself
+lives in the repo ([`install.sh`](install.sh)) — read it before piping if
+that's your policy. Prebuilt binaries cover linux/amd64, linux/arm64,
+darwin/amd64, darwin/arm64.
+
+### Option B: `go install`
 
 Requires Go 1.26+:
 
@@ -16,7 +32,7 @@ go install github.com/samishal1998/fleetplane/cmd/fleetplane@latest
 
 The binary lands in `$(go env GOPATH)/bin/fleetplane`. Note `fleetplane version` prints `dev` for locally built binaries — release builds inject the version via `-ldflags "-X main.version=..."`.
 
-### Option B: build from source
+### Option C: build from source
 
 ```bash
 git clone https://github.com/samishal1998/fleetplane

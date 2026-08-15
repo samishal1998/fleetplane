@@ -34,7 +34,13 @@ Everything mutating flows through a crash-safe **operation journal**: kill the p
 
 No cloud account needed — the built-in `fake` provider behaves like a real one, including asynchronous creates.
 
-Build from source (requires Go 1.26+):
+Install a prebuilt binary (Linux/macOS; the script is [`install.sh`](install.sh) in this repo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/samishal1998/fleetplane/main/install.sh | sh
+```
+
+Or build from source (requires Go 1.26+):
 
 ```bash
 git clone https://github.com/samishal1998/fleetplane
