@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 type operationStore struct{ q queryer }

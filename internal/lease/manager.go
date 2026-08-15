@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/sdk"
 )
 
 // PoolKicker level-triggers the reconciler when capacity frees up.

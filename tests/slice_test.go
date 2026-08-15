@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/boot"
-	"github.com/samimishal/fleetplane/internal/config"
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/internal/boot"
+	"github.com/samishal1998/fleetplane/internal/config"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 
-	_ "github.com/samimishal/fleetplane/providers/fake"
+	_ "github.com/samishal1998/fleetplane/providers/fake"
 )
 
 const machineSpec = `{"serverType":"cpx31","image":"snapshot:ci=1"}`

@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/samimishal/fleetplane/pkg/kinds"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/kinds"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // Kind is the resource kind this module defines.

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/app"
-	"github.com/samimishal/fleetplane/internal/capacity"
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/providers/fake"
+	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/capacity"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/providers/fake"
 )
 
 const cpu1 = `{"cpu":{"min":1}}`

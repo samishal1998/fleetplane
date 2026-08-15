@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 func TestParseSpecValid(t *testing.T) {

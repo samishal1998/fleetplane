@@ -16,10 +16,10 @@ import (
 
 	"github.com/digitalocean/godo"
 
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
-	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
-	"github.com/samimishal/fleetplane/providers/pacing"
+	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
+	"github.com/samishal1998/fleetplane/providers/pacing"
 )
 
 const Driver = "digitalocean"

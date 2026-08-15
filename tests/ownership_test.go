@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/app"
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/reconcile"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
-	"github.com/samimishal/fleetplane/providers/fake"
+	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/reconcile"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/providers/fake"
 )
 
 func enableDiscovery(h *Harness, cfg reconcile.DiscoveryConfig, healthy func(string) bool) {

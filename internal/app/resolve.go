@@ -7,8 +7,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 const (

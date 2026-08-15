@@ -15,11 +15,11 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"golang.org/x/time/rate"
 
-	"github.com/samimishal/fleetplane/providers/pacing"
+	"github.com/samishal1998/fleetplane/providers/pacing"
 
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
-	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
+	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
 )
 
 // mock is a minimal Hetzner API for the calls the driver makes.

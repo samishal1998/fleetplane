@@ -6,7 +6,7 @@
 # --self-test to prove every rule fires on planted violations.
 set -euo pipefail
 
-M=github.com/samimishal/fleetplane
+M=github.com/samishal1998/fleetplane
 FORBIDDEN_IN_KERNEL="$M/providers|hetznercloud|aws-sdk-go|google.golang.org/api|go-github"
 
 fail=0

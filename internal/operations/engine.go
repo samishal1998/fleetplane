@@ -22,11 +22,11 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
-	"github.com/samimishal/fleetplane/pkg/sdk"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
+	"github.com/samishal1998/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // Providers resolves a configured provider instance.

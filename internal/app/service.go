@@ -8,17 +8,17 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/lease"
-	"github.com/samimishal/fleetplane/internal/operations"
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/provision"
-	"github.com/samimishal/fleetplane/internal/reconcile"
-	"github.com/samimishal/fleetplane/internal/scheduler"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/kinds"
-	"github.com/samimishal/fleetplane/pkg/sdk"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/lease"
+	"github.com/samishal1998/fleetplane/internal/operations"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/provision"
+	"github.com/samishal1998/fleetplane/internal/reconcile"
+	"github.com/samishal1998/fleetplane/internal/scheduler"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/kinds"
+	"github.com/samishal1998/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // Typed errors the API layer maps to HTTP.

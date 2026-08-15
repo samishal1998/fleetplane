@@ -20,7 +20,7 @@ linters:
             - "**/pkg/kinds/**"
           listMode: lax
           deny:
-            - pkg: github.com/samimishal/fleetplane/providers
+            - pkg: github.com/samishal1998/fleetplane/providers
               desc: kernel never imports providers (02_ARCHITECTURE - Layers)
             - pkg: github.com/hetznercloud/hcloud-go
               desc: cloud SDKs forbidden in kernel
@@ -36,7 +36,7 @@ linters:
             - "**/providers/**"
           listMode: lax
           deny:
-            - pkg: github.com/samimishal/fleetplane/internal
+            - pkg: github.com/samishal1998/fleetplane/internal
               desc: providers see only pkg/sdk and pkg/kinds
         # pkg/sdk is a leaf; it must never grow dependencies on the app.
         sdk-hygiene:
@@ -44,7 +44,7 @@ linters:
             - "**/pkg/sdk/**"
           listMode: lax
           deny:
-            - pkg: github.com/samimishal/fleetplane/internal
+            - pkg: github.com/samishal1998/fleetplane/internal
               desc: SDK is a leaf package
-            - pkg: github.com/samimishal/fleetplane/providers
+            - pkg: github.com/samishal1998/fleetplane/providers
               desc: SDK is a leaf package

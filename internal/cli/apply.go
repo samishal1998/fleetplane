@@ -14,7 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/spf13/cobra"
 
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 func applyCmd(r *root) *cobra.Command {

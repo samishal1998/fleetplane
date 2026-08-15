@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 func resourcesCmd(r *root) *cobra.Command {

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 func TestSubprocess_Kill9DuringCreate_RecoversToReady(t *testing.T) {
@@ -27,7 +27,7 @@ func TestSubprocess_Kill9DuringCreate_RecoversToReady(t *testing.T) {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fleetplane")
-	buildCmd := exec.Command("go", "build", "-o", bin, "github.com/samimishal/fleetplane/cmd/fleetplane")
+	buildCmd := exec.Command("go", "build", "-o", bin, "github.com/samishal1998/fleetplane/cmd/fleetplane")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 func mustCreate(t *testing.T, f *Fake, resID, opID, ownerID string) provider.ExternalRef {

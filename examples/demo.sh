@@ -49,7 +49,7 @@ start_server() {
 }
 
 say "building fleetplane"
-go build -o "$bin" github.com/samimishal/fleetplane/cmd/fleetplane
+go build -o "$bin" github.com/samishal1998/fleetplane/cmd/fleetplane
 
 cfg="${FLEETPLANE_DEMO_CONFIG:-$work/config.yaml}"
 if [[ ! -f "$cfg" ]]; then

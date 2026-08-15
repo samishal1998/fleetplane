@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/sdk"
 )
 
 // ProviderHealth is one instance's health surface (07 §8: degraded

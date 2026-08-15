@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/conformance"
-	"github.com/samimishal/fleetplane/providers/fake"
+	"github.com/samishal1998/fleetplane/pkg/sdk/conformance"
+	"github.com/samishal1998/fleetplane/providers/fake"
 )
 
 // The fake provider passes the full conformance catalog under its most

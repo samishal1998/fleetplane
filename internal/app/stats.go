@@ -9,7 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 var (

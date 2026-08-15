@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 // --- pools ---

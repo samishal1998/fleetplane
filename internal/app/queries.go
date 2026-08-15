@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 func (s *Service) GetOperation(ctx context.Context, id string) (*storage.Operation, error) {

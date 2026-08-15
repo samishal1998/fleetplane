@@ -11,7 +11,7 @@ Related reading: [configuration reference](docs/guides/configuration.md), [CLI r
 Requires Go 1.26+:
 
 ```bash
-go install github.com/samimishal/fleetplane/cmd/fleetplane@latest
+go install github.com/samishal1998/fleetplane/cmd/fleetplane@latest
 ```
 
 The binary lands in `$(go env GOPATH)/bin/fleetplane`. Note `fleetplane version` prints `dev` for locally built binaries — release builds inject the version via `-ldflags "-X main.version=..."`.
@@ -19,7 +19,7 @@ The binary lands in `$(go env GOPATH)/bin/fleetplane`. Note `fleetplane version`
 ### Option B: build from source
 
 ```bash
-git clone https://github.com/samimishal/fleetplane
+git clone https://github.com/samishal1998/fleetplane
 cd fleetplane
 go build -o fleetplane ./cmd/fleetplane
 sudo install -m 0755 fleetplane /usr/local/bin/fleetplane

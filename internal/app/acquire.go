@@ -6,10 +6,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/lease"
-	"github.com/samimishal/fleetplane/internal/scheduler"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/lease"
+	"github.com/samishal1998/fleetplane/internal/scheduler"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 // AttachScheduling wires the scheduler and lease manager (built after the

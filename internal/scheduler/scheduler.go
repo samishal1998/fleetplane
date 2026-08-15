@@ -15,13 +15,13 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/samimishal/fleetplane/internal/capacity"
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/provision"
-	"github.com/samimishal/fleetplane/internal/reconcile"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/sdk"
+	"github.com/samishal1998/fleetplane/internal/capacity"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/provision"
+	"github.com/samishal1998/fleetplane/internal/reconcile"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/sdk"
 )
 
 // ErrNoCapacity: no candidate fits and scale-on-demand is not possible.

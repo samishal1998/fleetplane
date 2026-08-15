@@ -4,7 +4,7 @@ Status: Accepted (2026-08-13)
 
 ## Decision
 
-Module path `github.com/samimishal/fleetplane` (confirmed by the project owner). One Go module for all of v1.
+Module path `github.com/samishal1998/fleetplane` (confirmed by the project owner). One Go module for all of v1.
 
 ## Multi-module seam (doc 03 §5)
 

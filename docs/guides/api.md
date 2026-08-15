@@ -444,7 +444,7 @@ Any other action string returns 400 `invalid`.
 
 ## Go client
 
-`github.com/samimishal/fleetplane/pkg/apiclient` is a minimal Go client over this API:
+`github.com/samishal1998/fleetplane/pkg/apiclient` is a minimal Go client over this API:
 
 ```go
 package main
@@ -453,7 +453,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 func main() {

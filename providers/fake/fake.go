@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samimishal/fleetplane/pkg/kinds/compute"
-	"github.com/samimishal/fleetplane/pkg/kinds/volume"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
+	"github.com/samishal1998/fleetplane/pkg/kinds/volume"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // Driver is the registry name.

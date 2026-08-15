@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/reconcile"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/reconcile"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 // AttachReconciler completes the app wiring (built after the Service).

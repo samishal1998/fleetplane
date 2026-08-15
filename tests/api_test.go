@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/api"
-	"github.com/samimishal/fleetplane/internal/boot"
-	"github.com/samimishal/fleetplane/internal/config"
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/internal/api"
+	"github.com/samishal1998/fleetplane/internal/boot"
+	"github.com/samishal1998/fleetplane/internal/config"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 // startAuthServer boots a server with three tokens: admin, a read-only one,

@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"github.com/samimishal/fleetplane/internal/cli"
+	"github.com/samishal1998/fleetplane/internal/cli"
 )
 
 // version is set via -ldflags "-X main.version=..." on release builds.

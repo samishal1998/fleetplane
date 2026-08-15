@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
+	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
 )
 
 // InstanceConfig configures one provider instance (docs/03 §4). Settings is

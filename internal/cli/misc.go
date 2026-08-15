@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samimishal/fleetplane/internal/api"
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/internal/api"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 func poolsCmd(r *root) *cobra.Command {

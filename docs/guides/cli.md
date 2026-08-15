@@ -3,7 +3,7 @@
 Fleetplane ships as a single binary. `fleetplane serve` runs the control plane; every
 other command is a pure HTTP client of the public API — the CLI never touches the
 database or kernel packages directly ([ADR-006](../adr/ADR-006-cli.md)). Anything the
-CLI can do, plain HTTP (or [`pkg/apiclient`](https://github.com/samimishal/fleetplane/tree/main/pkg/apiclient))
+CLI can do, plain HTTP (or [`pkg/apiclient`](https://github.com/samishal1998/fleetplane/tree/main/pkg/apiclient))
 can do too.
 
 The same server also serves a web dashboard at `http://<server.addr>/ui/` (`/` redirects

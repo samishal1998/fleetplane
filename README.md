@@ -36,7 +36,7 @@ No cloud account needed — the built-in `fake` provider behaves like a real one
 Build from source (requires Go 1.26+):
 
 ```bash
-git clone https://github.com/samimishal/fleetplane
+git clone https://github.com/samishal1998/fleetplane
 cd fleetplane
 go build -o fleetplane ./cmd/fleetplane
 ```

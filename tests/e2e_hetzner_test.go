@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/conformance"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
-	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
-	"github.com/samimishal/fleetplane/providers/hetzner"
+	"github.com/samishal1998/fleetplane/pkg/sdk/conformance"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
+	"github.com/samishal1998/fleetplane/providers/hetzner"
 )
 
 func e2eProvider(t *testing.T) *hetzner.Hetzner {

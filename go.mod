@@ -1,4 +1,4 @@
-module github.com/samimishal/fleetplane
+module github.com/samishal1998/fleetplane
 
 go 1.26.0
 

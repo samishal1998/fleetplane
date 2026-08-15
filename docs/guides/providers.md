@@ -16,7 +16,7 @@ providers:
 ```
 
 Three drivers ship in the default binary (see
-[`cmd/fleetplane/modules.go`](https://github.com/samimishal/fleetplane/blob/main/cmd/fleetplane/modules.go)):
+[`cmd/fleetplane/modules.go`](https://github.com/samishal1998/fleetplane/blob/main/cmd/fleetplane/modules.go)):
 
 | Driver | Kinds | Notes |
 |---|---|---|
@@ -237,7 +237,7 @@ same name. A name that matches nothing fails fast with an `invalid` error.
 
 DigitalOcean has no key=value labels — only flat tags. The driver encodes
 Fleetplane's identity labels as tags of the form `fp-<short>:<value>`
-([`providers/digitalocean/tags.go`](https://github.com/samimishal/fleetplane/blob/main/providers/digitalocean/tags.go));
+([`providers/digitalocean/tags.go`](https://github.com/samishal1998/fleetplane/blob/main/providers/digitalocean/tags.go));
 the SDK contract (label maps) never changed, so the kernel is unaware of the
 difference. On a droplet you will see:
 
@@ -274,9 +274,9 @@ label-selector discovery; only the mechanics differ.
 ## Writing a provider
 
 A provider is a Go package implementing two interfaces from
-[`pkg/sdk/provider`](https://github.com/samimishal/fleetplane/tree/main/pkg/sdk/provider),
+[`pkg/sdk/provider`](https://github.com/samishal1998/fleetplane/tree/main/pkg/sdk/provider),
 registered via `init()`, and proven by the conformance suite. The fake provider
-([`providers/fake`](https://github.com/samimishal/fleetplane/tree/main/providers/fake))
+([`providers/fake`](https://github.com/samishal1998/fleetplane/tree/main/providers/fake))
 is the reference implementation — small, complete, and exercised by every kernel
 test. Read it first; the design rationale is in the
 [Provider SDK design doc](../03_PROVIDER_SDK.md).
@@ -293,7 +293,7 @@ Enforced mechanically by `make boundaries` ([ADR-009](../adr/ADR-009-boundaries.
   but the SDK surface.
 
 In-tree drivers also share the rate pacer in
-[`providers/pacing`](https://github.com/samimishal/fleetplane/tree/main/providers/pacing).
+[`providers/pacing`](https://github.com/samishal1998/fleetplane/tree/main/providers/pacing).
 
 ### The contract
 
@@ -446,16 +446,16 @@ func init() {
 ```
 
 Then add exactly one blank import to
-[`cmd/fleetplane/modules.go`](https://github.com/samimishal/fleetplane/blob/main/cmd/fleetplane/modules.go)
+[`cmd/fleetplane/modules.go`](https://github.com/samishal1998/fleetplane/blob/main/cmd/fleetplane/modules.go)
 — the only file touched to add or remove a provider from a distribution
 ([ADR-013](../adr/ADR-013-registration-labels.md)); there is no central switch
 statement:
 
 ```go
 import (
-    _ "github.com/samimishal/fleetplane/providers/digitalocean"
-    _ "github.com/samimishal/fleetplane/providers/fake"
-    _ "github.com/samimishal/fleetplane/providers/hetzner"
+    _ "github.com/samishal1998/fleetplane/providers/digitalocean"
+    _ "github.com/samishal1998/fleetplane/providers/fake"
+    _ "github.com/samishal1998/fleetplane/providers/hetzner"
     _ "github.com/you/fleetplane-provider-mycloud" // out-of-tree works too
 )
 ```
@@ -485,7 +485,7 @@ create bypasses journal accounting ([ADR-014](../adr/ADR-014-retries.md)).
 
 ### The conformance suite
 
-[`pkg/sdk/conformance`](https://github.com/samimishal/fleetplane/tree/main/pkg/sdk/conformance)
+[`pkg/sdk/conformance`](https://github.com/samishal1998/fleetplane/tree/main/pkg/sdk/conformance)
 is the acceptance bar: the same suite Fleetplane runs against its fake and
 (env-gated) against real clouds. A driver that passes it upholds every contract
 above. Wire it up as an ordinary Go test:
@@ -527,7 +527,7 @@ The subtest names are the contract:
 
 The fake provider passes the whole catalog under its most hostile deterministic
 settings — multi-step async creates and deletes, list lag, forced pagination —
-see [`providers/fake/conformance_test.go`](https://github.com/samimishal/fleetplane/blob/main/providers/fake/conformance_test.go).
+see [`providers/fake/conformance_test.go`](https://github.com/samishal1998/fleetplane/blob/main/providers/fake/conformance_test.go).
 The Hetzner E2E test runs the identical suite against the real cloud.
 
 ### Checklist

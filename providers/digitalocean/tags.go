@@ -9,7 +9,7 @@ package digitalocean
 import (
 	"strings"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // shortNames maps reserved label keys to compact tag prefixes.

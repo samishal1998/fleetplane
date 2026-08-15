@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 // pacer implements the plan-R18 rate policy. Hetzner's RateLimit-Reset

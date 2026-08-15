@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/config"
+	"github.com/samishal1998/fleetplane/internal/config"
 )
 
 func startApp(t *testing.T) (*App, context.CancelFunc, <-chan error) {

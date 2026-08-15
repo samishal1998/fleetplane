@@ -15,9 +15,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samimishal/fleetplane/internal/app"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/apiclient"
+	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
 
 type Server struct {

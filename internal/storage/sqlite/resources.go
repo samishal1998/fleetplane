@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/samimishal/fleetplane/internal/phase"
-	"github.com/samimishal/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/internal/phase"
+	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 type resourceStore struct{ q queryer }

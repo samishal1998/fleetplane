@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/samimishal/fleetplane/pkg/kinds/volume"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/kinds/volume"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
 )
 
 type volObject struct {

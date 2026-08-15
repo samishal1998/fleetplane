@@ -12,10 +12,10 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/samimishal/fleetplane/internal/ids"
-	"github.com/samimishal/fleetplane/internal/storage"
-	"github.com/samimishal/fleetplane/pkg/sdk/provider"
-	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
+	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/storage"
+	"github.com/samishal1998/fleetplane/pkg/sdk/provider"
+	"github.com/samishal1998/fleetplane/pkg/sdk/secretref"
 )
 
 // Providers is the provider instance manager: it constructs configured
