@@ -72,3 +72,31 @@ func FreeAfter(total, used, want Vector) int64 {
 	}
 	return free
 }
+
+// Request is the persisted acquisition request payload
+// (acquisitions.constraints): capacity constraints, exclusivity, and the
+// queueing contract resolved at accept time (docs/11 §8). MaxWaitMs is the
+// EFFECTIVE value (request else class default, clamped) — evaluation never
+// re-consults config, so a restart resumes exactly the same deadline.
+type Request struct {
+	Exclusive   bool            `json:"exclusive,omitempty"`
+	Constraints json.RawMessage `json:"constraints,omitempty"`
+	MaxWaitMs   int64           `json:"maxWaitMs,omitempty"`
+}
+
+// ParseRequest decodes the stored payload and derives the capacity want and
+// exclusivity (no dimensioned request = whole-machine semantics).
+func ParseRequest(raw json.RawMessage) (Request, Vector, bool, error) {
+	var req Request
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return req, nil, false, fmt.Errorf("acquisition constraints: %w", err)
+		}
+	}
+	want, err := WantFromConstraints(req.Constraints)
+	if err != nil {
+		return req, nil, false, err
+	}
+	exclusive := req.Exclusive || len(want) == 0
+	return req, want, exclusive, nil
+}

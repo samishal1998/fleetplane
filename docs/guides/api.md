@@ -152,6 +152,8 @@ Notes:
 
 `state` is one of `pending`, `provisioning`, `bound`, `failed`, `released`, `expired`. `resourceId` appears as soon as the acquisition is bound to a resource — on the scale-on-demand path it is already set while the acquisition is `provisioning` (the pre-bound pending resource); `leaseId` appears once the acquisition is `bound`.
 
+An acquisition with a queue budget ([cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)) additionally carries `maxWait` (a Go duration string) and `queueDeadline` (an RFC 3339 timestamp): the effective budget after class defaulting and clamping, and the instant at which the scheduler force-scales instead of waiting longer. Both are resolved deterministically at accept time, so they appear unchanged in idempotent replays.
+
 ### Pool
 
 ```json
@@ -347,6 +349,8 @@ Retrying the POST with the same `Idempotency-Key` returns the original 201 body 
 ### Acquire and release capacity
 
 Acquire asks Fleetplane to *find or create* suitable capacity: it prefers an existing ready resource with enough free capacity, and scales on demand otherwise. A request needs a `class` and/or `constraints`; `kind` defaults to `compute.machine`; `quantity` must be 1 in v1.
+
+The request body also takes an optional `maxWait` (a Go duration string, e.g. `"10m"`): a queue budget letting the acquisition wait for existing capacity before scaling up ([cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)); omitted, the class's `scheduling.queue.maxWait` applies. The field requires a server >= v0.4 — and because this endpoint rejects unknown fields, an older server answers a request carrying it with 400 `invalid` rather than silently ignoring it.
 
 ```bash
 curl -sS -X POST "$BASE/v1/acquisitions" \

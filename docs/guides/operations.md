@@ -184,6 +184,35 @@ Only `uncertain` is guaranteed to exist as a series; the other operation
 states appear only while such operations exist, so write alert expressions
 that tolerate absent series.
 
+### Cost-aware leasing metrics
+
+Nine series cover
+[cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)
+([design doc 11](../11_COST_AWARE_LEASING.md),
+[ADR-018](../adr/ADR-018-cost-aware-leasing.md)). Unlike the fleet gauges
+they are event-driven and process-lifetime — they reset on restart, so use
+`rate()`/`increase()` over them:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `fleetplane_resource_reuse_total` | counter | `class` | Acquisitions bound to already-existing capacity instead of a new create |
+| `fleetplane_scale_up_avoided_total` | counter | `class` | Queued acquisitions that bound to existing capacity instead of scaling up |
+| `fleetplane_acquisition_queue_seconds` | histogram | — | Time queued acquisitions waited before binding |
+| `fleetplane_resource_termination_seconds` | histogram | `provider` | Delete operation duration, journal to provider-confirmed terminal |
+| `fleetplane_billing_boundary_overruns_total` | counter | `provider` | Deletes of billing-aware resources confirmed after the boundary they targeted |
+| `fleetplane_billing_window_missed_total` | counter | `provider` | Reclaim-eligible resources whose termination window passed unused (they wait a full extra increment) |
+| `fleetplane_resource_paid_seconds_total` | counter | `provider`, `kind` | Billed lifetime of terminated billing-aware resources |
+| `fleetplane_resource_useful_seconds_total` | counter | `provider`, `kind` | Leased (busy) time of terminated billing-aware resources — merged lease spans, not lease-seconds |
+| `fleetplane_resource_paid_idle_seconds_total` | counter | `provider`, `kind` | Paid-but-idle time of terminated billing-aware resources (paid − useful, clamped at 0) |
+
+Is the optimization working? Four signals: `paid_idle_seconds` should trend
+**down** relative to `paid_seconds`, `scale_up_avoided_total` should be
+**greater than 0** on queue-enabled classes, `boundary_overruns_total`
+should stay **around 0** (if it climbs, raise the kind's `terminationBuffer`
+or enable `adaptive`), and `window_missed_total` should stay **near 0**
+(persistent misses mean the buffer and sweep cadence leave the termination
+window practically unhittable).
+
 ### What to alert on
 
 ```yaml

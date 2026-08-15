@@ -42,6 +42,24 @@ func (ls leaseStore) ActiveByResource(ctx context.Context, id storage.ResourceID
 	return out, rows.Err()
 }
 
+func (ls leaseStore) ByResource(ctx context.Context, id storage.ResourceID) ([]*storage.Lease, error) {
+	rows, err := ls.q.QueryContext(ctx,
+		`SELECT `+leaseCols+` FROM leases WHERE resource_id=? ORDER BY created_at`, string(id))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*storage.Lease
+	for rows.Next() {
+		l, err := scanLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 func (ls leaseStore) CountActive(ctx context.Context, id storage.ResourceID) (int, error) {
 	var n int
 	err := ls.q.QueryRowContext(ctx,

@@ -822,7 +822,7 @@
     data() {
       return {
         acqs: [], lookup: '', showAcquire: false, busy: false, formErr: '',
-        form: { class: '', kind: '', exclusive: false, ttl: '', constraints: '' },
+        form: { class: '', kind: '', exclusive: false, ttl: '', maxWait: '', constraints: '' },
         idem: uuid(),
       };
     },
@@ -846,6 +846,7 @@
         if (this.form.kind) body.kind = this.form.kind;
         if (this.form.exclusive) body.exclusive = true;
         if (this.form.ttl) body.lease = { ttl: this.form.ttl };
+        if (this.form.maxWait) body.maxWait = this.form.maxWait;
         if (this.form.constraints.trim()) {
           try { body.constraints = JSON.parse(this.form.constraints); }
           catch (e) { this.formErr = 'constraints: ' + e.message; return; }
@@ -891,6 +892,9 @@
           <input id="a-class" type="text" v-model="form.class" placeholder="ci" required>
           <label class="f" for="a-ttl">Lease TTL (optional)</label>
           <input id="a-ttl" type="text" v-model="form.ttl" placeholder="90m">
+          <label class="f" for="a-wait">Max wait (optional)</label>
+          <input id="a-wait" type="text" v-model="form.maxWait" placeholder="10m">
+          <div class="hint">Queue for existing capacity up to this long before a new machine is created (cost over latency).</div>
           <label class="f" for="a-cons">Constraints (optional JSON)</label>
           <textarea id="a-cons" v-model="form.constraints" style="min-height:64px" spellcheck="false"
                     placeholder='{"cpu":{"min":2},"memoryMiB":{"min":4096}}'></textarea>
@@ -943,6 +947,8 @@
           <dt>Resource kind</dt><dd>{{ a.resourceKind || '—' }}</dd>
           <dt>Resource</dt><dd class="mono"><a v-if="a.resourceId" :href="'#/resources/' + a.resourceId">{{ a.resourceId }}</a><span v-else>—</span></dd>
           <dt>Lease</dt><dd class="mono">{{ a.leaseId || '—' }}</dd>
+          <dt v-if="a.maxWait">Queue budget</dt><dd v-if="a.maxWait">{{ a.maxWait }}
+            <span v-if="a.queueDeadline" class="muted small">(scales up {{ $ago(a.queueDeadline) === 'now' ? 'soon' : 'at ' + $time(a.queueDeadline) }})</span></dd>
           <dt>Actor</dt><dd>{{ a.actor || '—' }}</dd>
           <dt>Created</dt><dd>{{ $time(a.createdAt) }} ({{ $ago(a.createdAt) }})</dd>
           <dt>Updated</dt><dd>{{ $time(a.updatedAt) }}</dd>

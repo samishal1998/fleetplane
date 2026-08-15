@@ -44,10 +44,23 @@ type Token struct {
 // provider-specific fields; reclaim.idleAfter enables poolless idle
 // reclamation for resources created from this class (plan R21).
 type Class struct {
-	Kind     string         `yaml:"kind"`
-	Provider string         `yaml:"provider"`
-	Spec     map[string]any `yaml:"spec"`
-	Reclaim  *ClassReclaim  `yaml:"reclaim"`
+	Kind       string           `yaml:"kind"`
+	Provider   string           `yaml:"provider"`
+	Spec       map[string]any   `yaml:"spec"`
+	Reclaim    *ClassReclaim    `yaml:"reclaim"`
+	Scheduling *ClassScheduling `yaml:"scheduling"`
+}
+
+// ClassScheduling holds the class's cost/latency tradeoff (docs/11 §8).
+type ClassScheduling struct {
+	Queue *QueuePolicy `yaml:"queue"`
+}
+
+// QueuePolicy: maxWait > 0 lets acquisitions of this class wait for
+// existing or in-flight capacity before scaling up (sequential lease
+// packing); 0/absent = provision immediately (today's behavior).
+type QueuePolicy struct {
+	MaxWait Duration `yaml:"maxWait"`
 }
 
 type ClassReclaim struct {
@@ -87,6 +100,24 @@ type Engine struct {
 type Provider struct {
 	Driver   string         `yaml:"driver"`
 	Settings map[string]any `yaml:"settings"`
+	// Billing overrides the driver's billing capability per resource kind
+	// (docs/11 §3–4). Fields are pointers: unset fields keep the driver's
+	// value, so a partial override never silently zeroes the rest.
+	Billing map[string]BillingOverride `yaml:"billing"`
+}
+
+// BillingOverride tunes one kind's billing policy (docs/11). disabled: true
+// is the explicit opt-out (zero policy = fine-grained = no billing-window
+// behavior); it may not be combined with the other fields.
+type BillingOverride struct {
+	Disabled          bool      `yaml:"disabled"`
+	MinimumDuration   *Duration `yaml:"minimumDuration"`
+	Increment         *Duration `yaml:"increment"`
+	TerminationBuffer *Duration `yaml:"terminationBuffer"`
+	// Adaptive derives the termination buffer from observed provider
+	// deletion durations (p95 + margin, floored by terminationBuffer,
+	// capped at increment/2 — docs/11 §12).
+	Adaptive bool `yaml:"adaptive"`
 }
 
 type Server struct {
@@ -151,6 +182,11 @@ func (c *Config) applyDefaults() {
 	if c.Server.ShutdownGrace == 0 {
 		c.Server.ShutdownGrace = Duration(20 * time.Second)
 	}
+	// One effective value everywhere (plan R6 default; the queue clamp and
+	// the boot sweep both read this — never a scattered fallback).
+	if c.Acquire.PendingTimeout == 0 {
+		c.Acquire.PendingTimeout = Duration(15 * time.Minute)
+	}
 }
 
 func (c *Config) validate() error {
@@ -161,6 +197,18 @@ func (c *Config) validate() error {
 		if p.Driver == "" {
 			return fmt.Errorf("providers.%s.driver is required", name)
 		}
+		for kind, b := range p.Billing {
+			if b.Disabled && (b.MinimumDuration != nil || b.Increment != nil || b.TerminationBuffer != nil || b.Adaptive) {
+				return fmt.Errorf("providers.%s.billing.%s: disabled may not be combined with other fields", name, kind)
+			}
+			for fname, d := range map[string]*Duration{
+				"minimumDuration": b.MinimumDuration, "increment": b.Increment, "terminationBuffer": b.TerminationBuffer,
+			} {
+				if d != nil && *d < 0 {
+					return fmt.Errorf("providers.%s.billing.%s.%s must be >= 0", name, kind, fname)
+				}
+			}
+		}
 	}
 	for name, cls := range c.Classes {
 		if cls.Kind == "" || cls.Provider == "" {
@@ -168,6 +216,16 @@ func (c *Config) validate() error {
 		}
 		if _, ok := c.Providers[cls.Provider]; !ok {
 			return fmt.Errorf("classes.%s references unknown provider %q", name, cls.Provider)
+		}
+		if cls.Scheduling != nil && cls.Scheduling.Queue != nil {
+			mw := cls.Scheduling.Queue.MaxWait
+			if mw < 0 {
+				return fmt.Errorf("classes.%s.scheduling.queue.maxWait must be >= 0", name)
+			}
+			if mw.Std() > c.Acquire.PendingTimeout.Std() {
+				return fmt.Errorf("classes.%s.scheduling.queue.maxWait (%s) exceeds acquire.pendingTimeout (%s)",
+					name, mw.Std(), c.Acquire.PendingTimeout.Std())
+			}
 		}
 	}
 	seen := map[string]bool{}

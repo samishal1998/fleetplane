@@ -58,6 +58,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("Discovery/Stability", c.discoveryStability)
 	t.Run("Discovery/OwnedScopeOnlyOwned", c.ownedScopeOnlyOwned)
 	t.Run("Operations/PollingReachesTerminal", c.lifecycle) // same proof, named per 03 §8
+	t.Run("Billing/CapabilityContract", c.billingContract)
 	if h.Expensive {
 		t.Run("Pagination/OverOnePage", c.pagination)
 	}
@@ -370,5 +371,25 @@ func (c *checker) pagination(t *testing.T) {
 		if deadline > c.h.MaxSteps {
 			t.Fatalf("pagination lost resources: saw %d of %d", got, total)
 		}
+	}
+}
+
+// billingContract validates the optional BillingAware capability (docs/11
+// §3): non-negative durations, zero policy for undeclared kinds, and
+// stability across calls. Skipped for providers without the capability.
+func (c *checker) billingContract(t *testing.T) {
+	ba, ok := c.h.Provider.(provider.BillingAware)
+	if !ok {
+		t.Skip("provider does not implement BillingAware")
+	}
+	pol := ba.Billing(c.h.Kind)
+	if pol.MinimumDuration < 0 || pol.BillingIncrement < 0 || pol.TerminationBuffer < 0 {
+		t.Fatalf("billing durations must be >= 0: %+v", pol)
+	}
+	if again := ba.Billing(c.h.Kind); again != pol {
+		t.Fatalf("billing policy unstable across calls: %+v vs %+v", pol, again)
+	}
+	if und := ba.Billing(provider.ResourceKind("conformance.undeclared/kind")); !und.FineGrained() {
+		t.Fatalf("undeclared kind must return the zero policy, got %+v", und)
 	}
 }

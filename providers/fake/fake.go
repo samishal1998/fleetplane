@@ -8,6 +8,7 @@
 package fake
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,7 +28,9 @@ func init() {
 	provider.Register(Driver, func(_ context.Context, cfg provider.InstanceConfig) (provider.Provider, error) {
 		var opt Options
 		if len(cfg.Settings) > 0 && string(cfg.Settings) != "null" {
-			if err := json.Unmarshal(cfg.Settings, &opt); err != nil {
+			dec := json.NewDecoder(bytes.NewReader(cfg.Settings))
+			dec.DisallowUnknownFields() // reference driver: typo'd test settings must fail loudly
+			if err := dec.Decode(&opt); err != nil {
 				return nil, &provider.Error{Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
 					Message: "fake settings: " + err.Error()}
 			}
@@ -43,6 +46,29 @@ type Options struct {
 	DeleteSteps  int `json:"deleteSteps"`  // ObserveOperation calls until a delete lands gone
 	ListLagSteps int `json:"listLagSteps"` // Discover calls before a new object becomes listable
 	PageSize     int `json:"pageSize"`     // internal Discover pagination chunk (0 = single page)
+	// Billing declares per-kind billing policies (docs/11) — the test
+	// control for billing-window behavior.
+	Billing map[string]BillingSettings `json:"billing,omitempty"`
+}
+
+// BillingSettings is the JSON shape of one kind's billing policy.
+type BillingSettings struct {
+	MinimumDuration   compute.Duration `json:"minimumDuration,omitempty"`
+	Increment         compute.Duration `json:"increment,omitempty"`
+	TerminationBuffer compute.Duration `json:"terminationBuffer,omitempty"`
+}
+
+// Billing implements provider.BillingAware from the instance settings.
+func (f *Fake) Billing(kind provider.ResourceKind) provider.BillingPolicy {
+	b, ok := f.opt.Billing[string(kind)]
+	if !ok {
+		return provider.BillingPolicy{}
+	}
+	return provider.BillingPolicy{
+		MinimumDuration:   b.MinimumDuration.Std(),
+		BillingIncrement:  b.Increment.Std(),
+		TerminationBuffer: b.TerminationBuffer.Std(),
+	}
 }
 
 // HookPoint names an interception point.

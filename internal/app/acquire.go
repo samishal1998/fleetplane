@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/samishal1998/fleetplane/internal/capacity"
 	"github.com/samishal1998/fleetplane/internal/ids"
 	"github.com/samishal1998/fleetplane/internal/lease"
 	"github.com/samishal1998/fleetplane/internal/scheduler"
@@ -26,6 +27,12 @@ type AcquireCmd struct {
 	Exclusive   bool
 	Quantity    int
 	TTL         time.Duration
+	// MaxWait is the queue budget (docs/11 §8): how long the acquisition
+	// may wait for existing/in-flight capacity before scaling up. Zero
+	// falls back to the class default; the effective value is resolved
+	// HERE, at accept time, and persisted — evaluation never re-consults
+	// config, so restarts resume the same deadline.
+	MaxWait time.Duration
 
 	Actor       string
 	IdemKey     string
@@ -53,12 +60,29 @@ func (s *Service) Acquire(ctx context.Context, cmd AcquireCmd) (Outcome, error) 
 
 	nowMs := s.clock.Now().UnixMilli()
 	acqID := storage.AcquisitionID(ids.New(ids.Acquisition))
-	// The stored constraint payload carries exclusivity too (one field the
-	// scheduler parses back — wantOf).
-	constraints, err := json.Marshal(struct {
-		Exclusive   bool            `json:"exclusive,omitempty"`
-		Constraints json.RawMessage `json:"constraints,omitempty"`
-	}{Exclusive: cmd.Exclusive, Constraints: cmd.Constraints})
+
+	// Effective queue budget: request value, else the class default —
+	// clamped (never rejected: rejection against a config-dependent limit
+	// would break byte-identical idempotent replay) to leave the sweep
+	// headroom below pendingTimeout.
+	maxWait := cmd.MaxWait
+	if maxWait <= 0 && cmd.Class != "" && s.sched != nil {
+		if cls, ok := s.sched.Classes().Class(cmd.Class); ok {
+			maxWait = cls.QueueMaxWait
+		}
+	}
+	if pt := s.pendingTimeoutMs; pt > 0 && maxWait.Milliseconds() > pt-10_000 {
+		maxWait = time.Duration(pt-10_000) * time.Millisecond
+		if maxWait < 0 {
+			maxWait = 0
+		}
+	}
+
+	// The stored payload is the whole scheduling request (docs/11 §8):
+	// exclusivity, constraints, and the resolved queue budget.
+	constraints, err := json.Marshal(capacity.Request{
+		Exclusive: cmd.Exclusive, Constraints: cmd.Constraints, MaxWaitMs: maxWait.Milliseconds(),
+	})
 	if err != nil {
 		return Outcome{}, err
 	}

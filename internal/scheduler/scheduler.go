@@ -14,9 +14,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
+	"time"
 
+	"github.com/samishal1998/fleetplane/internal/billing"
 	"github.com/samishal1998/fleetplane/internal/capacity"
 	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/metrics"
 	"github.com/samishal1998/fleetplane/internal/phase"
 	"github.com/samishal1998/fleetplane/internal/provision"
 	"github.com/samishal1998/fleetplane/internal/reconcile"
@@ -37,12 +41,20 @@ type Scheduler struct {
 	clock     sdk.Clock
 	log       *slog.Logger
 	ownerID   string
+
+	// queued tracks acquisitions currently held pending by the queue
+	// policy (docs/11 §7–8) — in-memory only: after a restart, a pending
+	// acquisition with maxWaitMs re-queues through the same decision, so
+	// the flag reconstitutes itself (the deadline itself is persisted).
+	qmu    sync.Mutex
+	queued map[storage.AcquisitionID]bool
 }
 
 func New(st storage.Store, providers provision.Providers, engine Kicker,
 	classes reconcile.ClassResolver, clock sdk.Clock, log *slog.Logger, ownerID string) *Scheduler {
 	return &Scheduler{st: st, providers: providers, engine: engine, classes: classes,
-		clock: clock, log: log, ownerID: ownerID}
+		clock: clock, log: log, ownerID: ownerID,
+		queued: map[storage.AcquisitionID]bool{}}
 }
 
 // Classes exposes the class resolver (shared with pool validation).
@@ -58,7 +70,7 @@ func (s *Scheduler) Satisfy(ctx context.Context, acqID storage.AcquisitionID) (*
 	if acq.State != storage.AcqPending {
 		return acq, nil // already satisfied / terminal
 	}
-	want, exclusive, err := wantOf(acq)
+	req, want, exclusive, err := capacity.ParseRequest(acq.Constraints)
 	if err != nil {
 		return nil, err
 	}
@@ -77,19 +89,179 @@ func (s *Scheduler) Satisfy(ctx context.Context, acqID storage.AcquisitionID) (*
 		if err == nil {
 			s.log.Info("acquisition bound to existing capacity",
 				"acquisition_id", acq.ID, "resource_id", cand.ID, "lease_id", lease)
+			s.observeBound(acq, cand.ID)
 			return s.st.Acquisitions().Get(ctx, acqID)
 		}
 		if !errors.Is(err, storage.ErrConflict) && !errors.Is(err, errInsufficient) {
 			return nil, err
 		}
 	}
+
+	// Queue decision (docs/11 §7–8): with a queue contract and capacity
+	// expected inside the deadline, stay pending instead of scaling. The
+	// 5s acquisition sweep re-runs Satisfy; past the deadline this branch
+	// no longer applies and the force-scale below happens naturally.
+	if req.MaxWaitMs > 0 {
+		nowMs := s.clock.Now().UnixMilli()
+		deadline := acq.CreatedAt + req.MaxWaitMs
+		if nowMs < deadline {
+			if est, ok := s.estimateWait(ctx, acq, want); ok && nowMs+est.Milliseconds() <= deadline {
+				s.markQueued(ctx, acq, est)
+				return acq, nil // deliberately still pending
+			}
+		}
+	}
+
 	// Step 8: scale on demand (needs a class).
 	return s.scaleOnDemand(ctx, acq)
+}
+
+// markQueued records the queue decision (idempotent; evented once).
+func (s *Scheduler) markQueued(ctx context.Context, acq *storage.Acquisition, est time.Duration) {
+	s.qmu.Lock()
+	first := !s.queued[acq.ID]
+	s.queued[acq.ID] = true
+	s.qmu.Unlock()
+	if !first {
+		return
+	}
+	s.log.Info("acquisition queued for existing capacity (docs/11 §7)",
+		"acquisition_id", acq.ID, "class", acq.Class, "estimated_wait", est.String())
+	_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
+		return tx.Events().Append(ctx, &storage.Event{
+			TS: s.clock.Now().UnixMilli(), Actor: acq.Actor, Type: "acquisition.queued",
+			Outcome: "queued",
+			Details: json.RawMessage(fmt.Sprintf(`{"acquisitionId":%q,"estimatedWait":%q}`, acq.ID, est.String())),
+		})
+	})
+}
+
+// observeBound records reuse/queue metrics when an acquisition binds to
+// EXISTING capacity (never for pre-bound fresh creates).
+func (s *Scheduler) observeBound(acq *storage.Acquisition, resID storage.ResourceID) {
+	if acq.PendingResourceID != nil && *acq.PendingResourceID == resID {
+		return // fresh scale-on-demand create, not reuse
+	}
+	metrics.ResourceReuse.WithLabelValues(acq.Class).Inc()
+	s.qmu.Lock()
+	wasQueued := s.queued[acq.ID]
+	delete(s.queued, acq.ID)
+	s.qmu.Unlock()
+	if wasQueued {
+		metrics.ScaleUpAvoided.WithLabelValues(acq.Class).Inc()
+		metrics.AcquisitionQueueSeconds.Observe(float64(s.clock.Now().UnixMilli()-acq.CreatedAt) / 1000)
+	}
+}
+
+// estimateWait predicts when compatible capacity frees up (docs/11 §8, v1):
+//   - a compatible leased resource whose blocking leases ALL carry expiries
+//     frees at the latest of them;
+//   - a compatible in-flight provisioning resource frees after the observed
+//     provisioning time plus the TTL of the acquisition pre-bound to it
+//     (nothing pre-bound: just the provisioning time) — this is what makes
+//     §7's simultaneous-request packing reachable at all.
+//
+// No computable estimate => (0, false): the caller scales, the
+// latency-safe default.
+func (s *Scheduler) estimateWait(ctx context.Context, acq *storage.Acquisition, want capacity.Vector) (time.Duration, bool) {
+	list, err := s.st.Resources().List(ctx, storage.ResourceFilter{
+		Kind:      acq.Kind,
+		Class:     acq.Class,
+		Phases:    []phase.Phase{phase.Ready, phase.Allocated, phase.Provisioning},
+		Ownership: []storage.Ownership{storage.OwnershipManaged},
+	})
+	if err != nil {
+		return 0, false
+	}
+	nowMs := s.clock.Now().UnixMilli()
+	var provisioningAcqs []*storage.Acquisition
+	best, found := time.Duration(0), false
+	better := func(d time.Duration) {
+		if d < 0 {
+			d = 0
+		}
+		if !found || d < best {
+			best, found = d, true
+		}
+	}
+	for _, res := range list {
+		if res.Phase == phase.Provisioning {
+			// Capacity is unknown until the create lands; estimable only
+			// for class-matched requests (the class fixes the shape).
+			if acq.Class == "" || res.Class != acq.Class {
+				continue
+			}
+			if provisioningAcqs == nil {
+				provisioningAcqs, _ = s.st.Acquisitions().ListByState(ctx, storage.AcqProvisioning)
+			}
+			holdMs := int64(0)
+			skip := false
+			for _, pa := range provisioningAcqs {
+				if pa.PendingResourceID != nil && *pa.PendingResourceID == res.ID {
+					if pa.TTLSeconds <= 0 {
+						skip = true // unbounded hold: no estimate from this one
+					}
+					holdMs = pa.TTLSeconds * 1000
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+			better(s.provisioningEstimate(ctx, res.Provider) + time.Duration(holdMs)*time.Millisecond)
+			continue
+		}
+		total, err := capacity.Parse(res.Capacity)
+		if err != nil || !capacity.Fits(total, capacity.Vector{}, want) {
+			continue // can never host this request
+		}
+		active, err := s.st.Leases().ActiveByResource(ctx, res.ID)
+		if err != nil || len(active) == 0 {
+			continue // idle-but-unreservable was already tried above
+		}
+		freeAt, ok := int64(0), true
+		for _, l := range active {
+			if l.ExpiresAt == nil {
+				ok = false // a lease with no TTL: unknown wait
+				break
+			}
+			if *l.ExpiresAt > freeAt {
+				freeAt = *l.ExpiresAt
+			}
+		}
+		if ok {
+			better(time.Duration(freeAt-nowMs) * time.Millisecond)
+		}
+	}
+	return best, found
+}
+
+// provisioningEstimate is the p50 of recent observed create durations for
+// the provider, defaulting to 90s with no samples.
+func (s *Scheduler) provisioningEstimate(ctx context.Context, prov storage.ProviderInstance) time.Duration {
+	ops, err := s.st.Operations().RecentTerminal(ctx, prov, storage.OpKindCreate, 20)
+	if err != nil || len(ops) == 0 {
+		return 90 * time.Second
+	}
+	ds := make([]time.Duration, 0, len(ops))
+	for _, op := range ops {
+		ds = append(ds, time.Duration(op.UpdatedAt-op.CreatedAt)*time.Millisecond)
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+	return ds[len(ds)/2]
 }
 
 type candidate struct {
 	ID    storage.ResourceID
 	score int64
+	// Billing tier (docs/11 §9, design-verified against the buffer):
+	//   0 = lease TTL fits before the SAFE termination point (boundary -
+	//       buffer) — reclaim stays possible; ranked by smallest slack;
+	//   1 = fits before the boundary but inside the buffer — placing here
+	//       defers this machine's clean reclaim;
+	//   2 = no TTL / fine-grained billing / crosses the boundary.
+	tier  int
+	slack int64
 }
 
 func (s *Scheduler) rankedCandidates(ctx context.Context, acq *storage.Acquisition, want capacity.Vector, exclusive bool) ([]candidate, error) {
@@ -138,10 +310,37 @@ func (s *Scheduler) rankedCandidates(ctx context.Context, acq *storage.Acquisiti
 		if !capacity.Fits(total, used, want) {
 			continue
 		}
-		out = append(out, candidate{ID: res.ID, score: capacity.FreeAfter(total, used, want)})
+		c := candidate{ID: res.ID, score: capacity.FreeAfter(total, used, want), tier: 2}
+		if acq.TTLSeconds > 0 {
+			if pol, _ := s.providers.Billing(res.Provider, res.Kind); !pol.FineGrained() {
+				nowMs := s.clock.Now().UnixMilli()
+				if b, ok := billing.NextBoundary(res.CreatedAt, pol, nowMs); ok {
+					// The scoring floor mirrors the reclaim sweep's buffer
+					// closely enough for placement (15s = default interval).
+					buffer := billing.EffectiveBuffer(pol, 15*time.Second)
+					leaseEnd := nowMs + acq.TTLSeconds*1000
+					safe := b - buffer.Milliseconds()
+					switch {
+					case leaseEnd <= safe:
+						c.tier, c.slack = 0, safe-leaseEnd
+					case leaseEnd <= b:
+						c.tier = 1
+					}
+				}
+			}
+		}
+		out = append(out, c)
 	}
-	// Deterministic best-fit: tightest fit first, ULID tie-break.
+	// Deterministic order: billing tier, then paid-window best-fit (tier
+	// 0), then capacity best-fit, ULID tie-break (docs/11 §9 — the scoring
+	// stays one replaceable function).
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].tier != out[j].tier {
+			return out[i].tier < out[j].tier
+		}
+		if out[i].tier == 0 && out[i].slack != out[j].slack {
+			return out[i].slack < out[j].slack
+		}
 		if out[i].score != out[j].score {
 			return out[i].score < out[j].score
 		}
@@ -319,19 +518,55 @@ func (s *Scheduler) Resume(ctx context.Context, pendingTimeout int64) error {
 	}
 	nowMs := s.clock.Now().UnixMilli()
 	for _, acq := range open {
-		// Expire never-satisfied acquisitions past the timeout.
-		if pendingTimeout > 0 && nowMs-acq.CreatedAt > pendingTimeout {
-			_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
-				return tx.Acquisitions().Transition(ctx, acq.ID, acq.State, storage.AcqExpired, nowMs)
-			})
-			continue
-		}
 		switch acq.State {
 		case storage.AcqPending:
-			if _, err := s.Satisfy(ctx, acq.ID); err != nil && !errors.Is(err, ErrNoCapacity) {
+			// Satisfy BEFORE the expiry check: a queued acquisition at its
+			// deadline must get its force-scale, not an expiry (design
+			// verification finding). ErrNoCapacity here is terminal — the
+			// caller isn't waiting, so fail fast instead of a silent extra
+			// (pendingTimeout - maxWait) wait.
+			if _, err := s.Satisfy(ctx, acq.ID); err != nil {
+				if errors.Is(err, ErrNoCapacity) {
+					_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
+						if err := tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqPending, storage.AcqFailed, nowMs); err != nil {
+							return err
+						}
+						return tx.Events().Append(ctx, &storage.Event{
+							TS: nowMs, Actor: acq.Actor, Type: "acquisition.failed", Outcome: "no_capacity",
+							Details: json.RawMessage(fmt.Sprintf(`{"acquisitionId":%q,"reason":"queue deadline elapsed without capacity or a scalable class"}`, acq.ID)),
+						})
+					})
+					continue
+				}
 				s.log.Error("acquisition resume", "acquisition_id", acq.ID, "error", err)
 			}
+			if cur, err := s.st.Acquisitions().Get(ctx, acq.ID); err == nil && cur.State == storage.AcqPending &&
+				pendingTimeout > 0 && nowMs-cur.CreatedAt > pendingTimeout {
+				_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
+					return tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqPending, storage.AcqExpired, nowMs)
+				})
+			}
 		case storage.AcqProvisioning:
+			// The provisioning clock restarts at the scale transition
+			// (UpdatedAt): a queued acquisition that consumed most of its
+			// pendingTimeout budget still gives its create a full runway.
+			if pendingTimeout > 0 && nowMs-acq.UpdatedAt > pendingTimeout {
+				_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
+					if err := tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqProvisioning, storage.AcqExpired, nowMs); err != nil {
+						return err
+					}
+					details := `{"acquisitionId":"` + string(acq.ID) + `"`
+					if acq.PendingResourceID != nil {
+						details += `,"orphanedPrebindResourceId":"` + string(*acq.PendingResourceID) + `"`
+					}
+					details += `}`
+					return tx.Events().Append(ctx, &storage.Event{
+						TS: nowMs, Actor: acq.Actor, Type: "acquisition.expired", Outcome: "provisioning_timeout",
+						ResourceID: acq.PendingResourceID, Details: json.RawMessage(details),
+					})
+				})
+				continue
+			}
 			if acq.PendingResourceID == nil {
 				continue
 			}
@@ -350,22 +585,9 @@ func (s *Scheduler) Resume(ctx context.Context, pendingTimeout int64) error {
 	return nil
 }
 
-// wantOf derives the requested capacity and exclusivity from the request.
+// wantOf derives the requested capacity and exclusivity from the request
+// (capacity.ParseRequest is the single parser — docs/11 §8).
 func wantOf(acq *storage.Acquisition) (capacity.Vector, bool, error) {
-	var req struct {
-		Exclusive   bool            `json:"exclusive"`
-		Constraints json.RawMessage `json:"constraints"`
-	}
-	if len(acq.Constraints) > 0 {
-		if err := json.Unmarshal(acq.Constraints, &req); err != nil {
-			return nil, false, fmt.Errorf("acquisition constraints: %w", err)
-		}
-	}
-	want, err := capacity.WantFromConstraints(req.Constraints)
-	if err != nil {
-		return nil, false, err
-	}
-	// No dimensioned request at all = whole-machine semantics.
-	exclusive := req.Exclusive || len(want) == 0
-	return want, exclusive, nil
+	_, want, exclusive, err := capacity.ParseRequest(acq.Constraints)
+	return want, exclusive, err
 }

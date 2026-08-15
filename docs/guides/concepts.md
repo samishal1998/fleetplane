@@ -137,6 +137,19 @@ Key semantics:
 
 Acquisition states: `pending → provisioning → bound`, terminally `released`, `expired`, or `failed`. Lease states: `active`, `released`, `expired`.
 
+## Cost-aware leasing (billing windows)
+
+Leases, resources, and money have **three different lifetimes**. A lease is how long a caller needs capacity; a resource is the infrastructure providing it; the billing window is what the provider actually charges — often a full hour for a machine that ran ten minutes. Fleetplane keeps the three apart and schedules against the third ([design doc 11](../11_COST_AWARE_LEASING.md), [ADR-018](../adr/ADR-018-cost-aware-leasing.md)).
+
+What that changes in practice:
+
+- **Ending a lease does not destroy the machine.** Under coarse billing (hourly, say), a released machine's remaining window is already paid for. The scheduler prefers reusing that machine over creating a new one, and placement favors the candidate whose remaining paid window best covers the requested TTL.
+- **Termination targets a window, not a moment.** An idle, reclaim-eligible machine is deleted inside a window just *before* its next billing boundary — early enough (the termination buffer) that provider-side deletion completes inside the increment already paid for. Past the point of no return — too close to the boundary for the delete to land in time — the next increment is inescapable, so Fleetplane deliberately keeps the machine and targets the following boundary: crossing a billing boundary intentionally beats paying for another hour and holding nothing.
+- **Acquisitions can queue.** With a queue budget (`maxWait` on the request, or the class's `scheduling.queue.maxWait`), an acquisition waits for existing or in-flight capacity instead of scaling up immediately — two 5-minute jobs pack into one paid hour instead of two. At the deadline the scheduler force-scales, so a queued acquisition never waits past its budget. Queued work also *protects* capacity: an idle machine that a queued acquisition could use is not reclaimed out from under it (one queued request protects one best-fit machine, never the whole class).
+- **Active leases always win.** Cost-based reclamation never touches a leased machine — correctness and lease guarantees take precedence over cost optimization.
+
+Billing awareness is **per provider instance, per resource kind, and off by default**: it activates only where the driver declares a billing policy (Hetzner and DigitalOcean ship hourly defaults for machines) or where the config sets one — and `disabled: true` opts a kind back out. Providers with fine-grained billing keep the ordinary lease/idle reclamation path unchanged. The knobs live in the [configuration reference](configuration.md#billing-providersnamebilling); whether the optimization is actually paying off is measurable — see the [operations guide's cost metrics](operations.md#cost-aware-leasing-metrics).
+
 ## The operation journal
 
 This is the heart of the crash-safety story. **Every provider mutation is journaled before the provider is called** — the operation engine is the only component that talks to provider mutation APIs, and it is also the only retry authority ([ADR-014](../adr/ADR-014-retries.md)).
@@ -248,5 +261,7 @@ Everything above has a visual counterpart in the embedded web dashboard: fleet o
 - [04 API and resource model](../04_API_AND_RESOURCE_MODEL.md) — envelopes, classes, pools, leases
 - [05 Reconciliation and scheduling](../05_RECONCILIATION_AND_SCHEDULING.md) — the reconciliation equation, scheduler steps
 - [06 Storage and HA](../06_STORAGE_AND_HA.md) — the journal protocol, SQLite, the HA path
+- [11 Cost-aware leasing](../11_COST_AWARE_LEASING.md) — billing windows, queueing, termination policy
 - [ADR-014](../adr/ADR-014-retries.md) — why the operation engine is the only retry authority
 - [ADR-017](../adr/ADR-017-operation-states.md) — operation states, tombstone deletion, ghost vs. orphan
+- [ADR-018](../adr/ADR-018-cost-aware-leasing.md) — the cost-aware leasing implementation decisions

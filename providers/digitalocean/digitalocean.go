@@ -96,6 +96,16 @@ func New(ctx context.Context, cfg provider.InstanceConfig) (*DigitalOcean, error
 
 // --- provider.Provider ---
 
+// Billing implements provider.BillingAware: droplets bill per started hour
+// (capped monthly — the hourly increment is the conservative model for
+// window scheduling). Volumes are not modeled (fine-grained default).
+func (d *DigitalOcean) Billing(kind provider.ResourceKind) provider.BillingPolicy {
+	if kind == compute.Kind {
+		return provider.BillingPolicy{BillingIncrement: time.Hour, TerminationBuffer: 5 * time.Minute}
+	}
+	return provider.BillingPolicy{}
+}
+
 func (d *DigitalOcean) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
 		Driver: Driver, Instance: d.instance, Version: "godo",

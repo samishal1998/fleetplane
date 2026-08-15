@@ -25,6 +25,7 @@ import (
 	"github.com/samishal1998/fleetplane/internal/app"
 	"github.com/samishal1998/fleetplane/internal/config"
 	"github.com/samishal1998/fleetplane/internal/lease"
+	"github.com/samishal1998/fleetplane/internal/metrics"
 	"github.com/samishal1998/fleetplane/internal/operations"
 	"github.com/samishal1998/fleetplane/internal/reconcile"
 	"github.com/samishal1998/fleetplane/internal/scheduler"
@@ -77,7 +78,20 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 			_ = db.Close()
 			return nil, fmt.Errorf("providers.%s: %w", name, err)
 		}
-		specs = append(specs, app.ProviderSpec{Name: name, Driver: p.Driver, Settings: settings})
+		spec := app.ProviderSpec{Name: name, Driver: p.Driver, Settings: settings}
+		for kind, b := range p.Billing {
+			if spec.Billing == nil {
+				spec.Billing = map[string]app.BillingOverride{}
+			}
+			spec.Billing[kind] = app.BillingOverride{
+				Disabled:          b.Disabled,
+				MinimumDuration:   durPtr(b.MinimumDuration),
+				Increment:         durPtr(b.Increment),
+				TerminationBuffer: durPtr(b.TerminationBuffer),
+				Adaptive:          b.Adaptive,
+			}
+		}
+		specs = append(specs, spec)
 	}
 	providers, err := app.BuildProviders(ctx, db, specs, ownerID, secretref.NewDefault(), log, clock.Now().UnixMilli())
 	if err != nil {
@@ -101,6 +115,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		if cls.Reclaim != nil {
 			rc.Reclaim = &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(cls.Reclaim.IdleAfter.Std())}
 		}
+		if cls.Scheduling != nil && cls.Scheduling.Queue != nil {
+			rc.QueueMaxWait = cls.Scheduling.Queue.MaxWait.Std()
+		}
 		classes[name] = rc
 	}
 	reconciler := reconcile.New(db, providers, engine, classes, clock, log, ownerID, reconcile.Config{
@@ -109,14 +126,17 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	})
 	sched := scheduler.New(db, providers, engine, classes, clock, log, ownerID)
 	leases := lease.New(db, clock, log, reconciler)
+	costs := app.NewCostObserver(db, providers)
 	engine.OnTerminal = func(op *storage.Operation) {
 		reconciler.HandleOpTerminal(op)
 		sched.HandleOpTerminal(op)
+		costs.HandleOpTerminal(op)
 	}
 
 	service := app.NewService(db, providers, engine, clock, log, ownerID)
 	service.AttachScheduling(sched, leases)
 	service.AttachReconciler(reconciler)
+	service.SetPendingTimeout(cfg.Acquire.PendingTimeout.Std().Milliseconds())
 
 	auth, err := buildAuth(cfg)
 	if err != nil {
@@ -209,6 +229,7 @@ func (a *App) Serve(ctx context.Context) error {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(app.NewFleetCollector(a.db, a.health))
 	reg.MustRegister(collectors.NewGoCollector())
+	metrics.Register(reg) // docs/11 §18 cost metrics
 	opsMux := http.NewServeMux()
 	opsMux.Handle("/health/", health)
 	opsMux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -324,11 +345,16 @@ func (a *App) mutationGate(next http.Handler) http.Handler {
 func (a *App) Service() *app.Service { return a.service }
 
 func (a *App) pendingTimeoutMillis() int64 {
-	t := a.cfg.Acquire.PendingTimeout.Std()
-	if t <= 0 {
-		t = 15 * time.Minute
+	// The default is applied at config load — one effective value.
+	return a.cfg.Acquire.PendingTimeout.Std().Milliseconds()
+}
+
+func durPtr(d *config.Duration) *time.Duration {
+	if d == nil {
+		return nil
 	}
-	return t.Milliseconds()
+	v := d.Std()
+	return &v
 }
 
 // sweepLoop runs the periodic level triggers that have no push signal:

@@ -127,6 +127,9 @@ type LeaseStore interface {
 	// Transition CASes on from-state and stamps EndedAt for terminal states.
 	Transition(ctx context.Context, id LeaseID, from, to LeaseState, atMillis int64) error
 	Expiring(ctx context.Context, nowMillis int64, limit int) ([]*Lease, error)
+	// ByResource returns every lease (any state) for the resource — the
+	// paid/useful accounting input (docs/11 §18).
+	ByResource(ctx context.Context, id ResourceID) ([]*Lease, error)
 }
 
 type OperationStore interface {
@@ -145,6 +148,10 @@ type OperationStore interface {
 	// CountPending exists as a cross-check assertion only (plan R20):
 	// deficit math counts provisioning resource rows.
 	CountPending(ctx context.Context, pool PoolID, kind OpKind) (int, error)
+	// RecentTerminal returns the newest succeeded operations of one kind for
+	// the provider — the observed-duration samples behind the adaptive
+	// termination buffer and the provisioning-wait estimate (docs/11 §12).
+	RecentTerminal(ctx context.Context, provider ProviderInstance, kind OpKind, limit int) ([]*Operation, error)
 }
 
 type IdempotencyStore interface {

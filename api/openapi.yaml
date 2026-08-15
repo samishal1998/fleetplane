@@ -263,6 +263,9 @@ components:
             machine: { type: object }
     AcquireRequest:
       type: object
+      # The server rejects unknown fields; the spec says so too, so
+      # spec-validated clients can't drift (docs/11 review finding).
+      additionalProperties: false
       properties:
         kind: { type: string }
         class: { type: string }
@@ -276,6 +279,9 @@ components:
         lease:
           type: object
           properties: { ttl: { type: string, example: "90m" } }
+        # Queue budget (docs/11 §8): wait for existing capacity up to this
+        # long before scaling up; empty = class default; "0s" = never queue.
+        maxWait: { type: string, example: "10m" }
         idempotencyKey: { type: string }
     Acquisition:
       type: object
@@ -290,6 +296,8 @@ components:
         resourceId: { type: string }
         leaseId: { type: string }
         actor: { type: string }
+        maxWait: { type: string, description: "resolved queue budget (docs/11 §8)" }
+        queueDeadline: { type: string, format: date-time, description: "createdAt + maxWait; after this the acquisition scales up" }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     PoolManifest:

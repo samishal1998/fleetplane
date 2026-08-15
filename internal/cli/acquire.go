@@ -13,7 +13,7 @@ import (
 )
 
 func acquireCmd(r *root) *cobra.Command {
-	var class, ttl, idemKey string
+	var class, ttl, maxWait, idemKey string
 	var cpu, memoryMiB int64
 	var exclusive bool
 	cmd := &cobra.Command{
@@ -35,6 +35,7 @@ func acquireCmd(r *root) *cobra.Command {
 			if ttl != "" {
 				req.Lease = &apiclient.LeaseRequest{TTL: ttl}
 			}
+			req.MaxWait = maxWait
 			acq, err := r.client().Acquire(cmd.Context(), req, idemKey)
 			if err != nil {
 				return err
@@ -55,6 +56,7 @@ func acquireCmd(r *root) *cobra.Command {
 	cmd.Flags().Int64Var(&memoryMiB, "memory-mib", 0, "minimum memory in MiB")
 	cmd.Flags().BoolVar(&exclusive, "exclusive", false, "whole-machine lease (implied when no constraints given)")
 	cmd.Flags().StringVar(&ttl, "ttl", "", "lease TTL, e.g. 90m")
+	cmd.Flags().StringVar(&maxWait, "max-wait", "", "queue budget, e.g. 10m: wait for existing capacity before scaling up (needs server >= v0.4)")
 	cmd.Flags().StringVar(&idemKey, "idempotency-key", "", "idempotency key")
 	return cmd
 }

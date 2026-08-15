@@ -104,6 +104,18 @@ several snapshots match, the most recently created one is used, so
 that matches nothing is a configuration error: the create fails fast with an
 `invalid` error (`no image matches ...`) instead of retrying.
 
+### Billing
+
+The driver declares Hetzner's per-started-hour billing — an hourly increment
+plus a `5m` termination buffer — for `compute.machine`
+([cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)). As a
+result, when a class sets `reclaim.idleAfter`, an idle machine is not deleted
+the moment the idle window elapses: the delete waits for the safe window just
+before the next billing boundary, since the hour is already paid for. To get
+plain idle-reclaim timing back, opt the kind out with `disabled: true` under
+`providers.<name>.billing`
+([configuration → billing](configuration.md#billing-providersnamebilling)).
+
 ### Identity labels
 
 Fleetplane stamps every server it creates with real Hetzner key=value labels,
@@ -233,6 +245,17 @@ not a label selector. If several of your snapshots share the name, the most
 recently created one is used — so an image pipeline can keep uploading under the
 same name. A name that matches nothing fails fast with an `invalid` error.
 
+### Billing
+
+The driver declares hourly billing with a `5m` termination buffer for
+`compute.machine` only (droplets bill per started hour; the monthly cap is
+deliberately not modeled — hourly is the conservative model for window
+scheduling). With `reclaim.idleAfter` on a class, idle droplets are therefore
+deleted in the safe window before their next billing boundary rather than
+immediately when the idle window elapses; opt out per kind with
+`disabled: true` under `providers.<name>.billing`
+([configuration → billing](configuration.md#billing-providersnamebilling)).
+
 ### Identity labels become `fp-*` tags
 
 DigitalOcean has no key=value labels — only flat tags. The driver encodes
@@ -344,6 +367,35 @@ use. The lifecycle of every mutation is:
 Every observation fills `ObservedResource.Extensions` with the full native
 object verbatim (invariant 6) — Fleetplane passes it through to
 `status.extensions` untouched.
+
+### Optional capability: billing
+
+A driver whose cloud bills in coarse increments can say so per kind by
+implementing the optional `provider.BillingAware` interface
+([`pkg/sdk/provider/billing.go`](https://github.com/samishal1998/fleetplane/blob/main/pkg/sdk/provider/billing.go)),
+discovered by type assertion — no change to the core `Provider` contract:
+
+```go
+type BillingAware interface {
+    Billing(kind ResourceKind) BillingPolicy
+}
+
+type BillingPolicy struct {
+    MinimumDuration   time.Duration // shortest period ever billed (0 = none)
+    BillingIncrement  time.Duration // granularity after the minimum (0 = fine-grained)
+    TerminationBuffer time.Duration // dispatch deletes this early before a boundary
+}
+```
+
+The zero `BillingPolicy` means fine-grained billing — no billing-window
+behavior — and `Billing` **must** return the zero policy for kinds the driver
+does not bill-model. The conformance suite's `Billing/CapabilityContract`
+subtest checks exactly this contract: non-negative fields, deterministic
+answers, and the zero policy for undeclared kinds. Billing facts flow one
+way — the driver states them, the kernel's lifecycle policy decides what to
+do with them ([design doc 11 §20](../11_COST_AWARE_LEASING.md)) — and
+operators can override or disable them per instance and kind
+([configuration → billing](configuration.md#billing-providersnamebilling)).
 
 ### The ActionID dedup rule
 
@@ -524,6 +576,7 @@ The subtest names are the contract:
 | `Discovery/OwnedScopeOnlyOwned` | `ScopeOwned` returns only owned resources |
 | `Operations/PollingReachesTerminal` | `ObserveOperation` reaches a terminal state |
 | `Pagination/OverOnePage` | Multi-page discovery loses nothing (`Expensive` only) |
+| `Billing/CapabilityContract` | Optional `BillingAware`: fields non-negative, answers deterministic, undeclared kinds fine-grained (skipped when not implemented) |
 
 The fake provider passes the whole catalog under its most hostile deterministic
 settings — multi-step async creates and deletes, list lag, forced pagination —

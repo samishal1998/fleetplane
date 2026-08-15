@@ -14,6 +14,13 @@ providers:
     settings:
       token: secret://env/HETZNER_TOKEN
       location: fsn1
+    # Billing overrides (docs/11): the hetzner driver already declares
+    # hourly billing with a 5m termination buffer; override per kind, or
+    # opt out with disabled: true.
+    # billing:
+    #   compute.machine:
+    #     terminationBuffer: 3m
+    #     adaptive: true      # p95-of-observed-deletes buffer (ADR-018)
 
 # Classes are reusable creation templates (04 §2). reclaim.idleAfter makes
 # idle poolless machines created from the class get deleted automatically.
@@ -27,6 +34,11 @@ classes:
       location: fsn1
     reclaim:
       idleAfter: 5m
+    # Queue budget (docs/11 §8): acquisitions of this class wait for
+    # existing/in-flight capacity before a new machine is created.
+    # scheduling:
+    #   queue:
+    #     maxWait: 10m
 
 # Static API tokens (generate with: fleetplane token new --name ci --perm resource.acquire ...)
 auth:

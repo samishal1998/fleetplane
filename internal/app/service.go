@@ -55,7 +55,14 @@ type Service struct {
 	sched  *scheduler.Scheduler
 	leases *lease.Manager
 	rec    *reconcile.Reconciler
+
+	// pendingTimeoutMs caps every queue deadline (docs/11 §8; the clamp
+	// replaces request-time rejection so idempotent replays stay valid).
+	pendingTimeoutMs int64
 }
+
+// SetPendingTimeout wires the effective acquire.pendingTimeout (boot).
+func (s *Service) SetPendingTimeout(ms int64) { s.pendingTimeoutMs = ms }
 
 func NewService(st storage.Store, p *Providers, e *operations.Engine, clock sdk.Clock, log *slog.Logger, ownerID string) *Service {
 	return &Service{st: st, providers: p, engine: e, clock: clock, log: log, ownerID: ownerID}

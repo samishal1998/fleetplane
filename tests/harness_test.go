@@ -126,6 +126,14 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 			Kind: "storage.volume", Provider: "fake-local",
 			Spec: json.RawMessage(`{"sizeGiB":100,"filesystem":"ext4"}`),
 		},
+		// docs/11: queue-enabled class — acquisitions wait up to 10m for
+		// existing/in-flight capacity before scaling up.
+		"ci-queue": reconcile.Class{
+			Kind: "compute.machine", Provider: "fake-local",
+			Spec:         json.RawMessage(machineSpec),
+			Reclaim:      &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(10 * time.Minute)},
+			QueueMaxWait: 10 * time.Minute,
+		},
 	}
 	h.Rec = reconcile.New(st, providers, h.Engine, classes, h.Clock, log, ownerID, reconcile.Config{})
 	h.Sched = scheduler.New(st, providers, h.Engine, classes, h.Clock, log, ownerID)

@@ -12,7 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samishal1998/fleetplane/internal/billing"
+	"github.com/samishal1998/fleetplane/internal/capacity"
 	"github.com/samishal1998/fleetplane/internal/ids"
+	"github.com/samishal1998/fleetplane/internal/metrics"
 	"github.com/samishal1998/fleetplane/internal/phase"
 	"github.com/samishal1998/fleetplane/internal/provision"
 	"github.com/samishal1998/fleetplane/internal/storage"
@@ -43,6 +46,9 @@ type Class struct {
 	Provider string
 	Spec     json.RawMessage
 	Reclaim  *ReclaimPolicy // optional class-level idle policy (plan R21)
+	// QueueMaxWait is the class's default acquisition queue budget
+	// (docs/11 §8); zero = provision immediately.
+	QueueMaxWait time.Duration
 }
 
 // ClassResolver resolves class names (config-owned).
@@ -91,6 +97,16 @@ type Reconciler struct {
 
 	disc          *discovery
 	sweepInstance string // instance under sweep (sweeps are serialized)
+
+	// Cost-reclaim state, touched only from the reconcile goroutine (and
+	// sequential tests): missed-window dedup + adaptive buffer cache.
+	missedBoundary map[storage.ResourceID]int64
+	adaptiveCache  map[storage.ProviderInstance]adaptiveEntry
+}
+
+type adaptiveEntry struct {
+	buffer     time.Duration
+	computedAt int64
 }
 
 func New(st storage.Store, providers provision.Providers, engine Kicker, classes ClassResolver,
@@ -100,6 +116,8 @@ func New(st storage.Store, providers provision.Providers, engine Kicker, classes
 		st: st, providers: providers, engine: engine, classes: classes,
 		clock: clock, log: log, ownerID: ownerID, cfg: cfg,
 		dirty: map[storage.PoolID]bool{}, wake: make(chan struct{}, 1),
+		missedBoundary: map[storage.ResourceID]int64{},
+		adaptiveCache:  map[storage.ProviderInstance]adaptiveEntry{},
 	}
 }
 
@@ -185,7 +203,15 @@ func (r *Reconciler) Run(ctx context.Context) {
 
 // ReclaimPoolless reclaims idle poolless resources whose CLASS declares an
 // idle policy (plan R21) — this is what makes the 08 §7 demo's "idle policy
-// eventually deletes" work without a pool. Returns deletes journaled.
+// eventually deletes" work without a pool. With a billing-aware provider,
+// the delete waits for the termination window before the next billing
+// boundary (docs/11 §11–14) and queued compatible acquisitions protect
+// their best-fit resources (docs/11 invariant 6). Returns deletes journaled.
+//
+// Cost-based deletes are journaled in a SINGLE transaction with every gate
+// re-checked inside it — never parked in Draining first: a parked resource
+// would be invisible to the scheduler while the queued acquisition that
+// blocks its deletion waits for it (design verification blocker).
 func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 	list, err := r.st.Resources().List(ctx, storage.ResourceFilter{
 		Poolless:  true,
@@ -197,12 +223,19 @@ func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 	}
 	nowMs := r.clock.Now().UnixMilli()
 	budget := r.cfg.MaxMutationsPerCycle
+	// Cost deletes have their own bound: they must not compete with pool
+	// convergence for MaxMutationsPerCycle, or burst-created fleets miss
+	// their shared window every cycle (design verification finding).
+	costBudget := 50
+
+	queued := r.queuedAcquisitions(ctx, nowMs)
 	n := 0
 	for _, res := range list {
-		if budget <= 0 {
-			break
-		}
 		if res.Phase == phase.Draining {
+			// Explicit drains keep the two-step pipeline and shared budget.
+			if budget <= 0 {
+				continue
+			}
 			if err := r.journalDelete(ctx, res, nowMs); err == nil {
 				n++
 				budget--
@@ -213,23 +246,199 @@ func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 		if !ok || cls.Reclaim == nil || cls.Reclaim.IdleAfter.Std() <= 0 {
 			continue // no policy = never auto-reclaimed
 		}
-		if res.DeleteProtected {
+		if res.DeleteProtected || costBudget <= 0 {
 			continue
 		}
 		if nowMs-idleSinceOf(res) < cls.Reclaim.IdleAfter.Std().Milliseconds() {
 			continue
 		}
-		if cnt, err := r.st.Leases().CountActive(ctx, res.ID); err != nil || cnt > 0 {
-			continue // invariant 3
+		// Queued work is considered before terminating reusable capacity:
+		// each queued satisfiable acquisition protects one best-fit
+		// resource (greedy matching — not the whole class).
+		if claimQueued(queued, res) {
+			continue
 		}
-		if err := r.casPhase(ctx, res.ID, phase.Ready, phase.Draining, nowMs); err == nil {
-			if err := r.journalDelete(ctx, res, nowMs); err == nil {
-				n++
-				budget--
+		// Billing window: keep already-paid capacity available until the
+		// termination window; past the cutoff the increment is inescapable
+		// — keep and target the next boundary (§14).
+		pol, _ := r.providers.Billing(res.Provider, res.Kind)
+		if !pol.FineGrained() {
+			buffer := r.effectiveBuffer(ctx, res.Provider, res.Kind, pol)
+			w, ok := billing.TerminationWindow(res.CreatedAt, pol, nowMs, buffer, 0)
+			if ok {
+				switch w.Decide(nowMs) {
+				case billing.Keep:
+					continue
+				case billing.Crossed:
+					if r.missedBoundary[res.ID] != w.BoundaryMs {
+						r.missedBoundary[res.ID] = w.BoundaryMs
+						metrics.WindowMissed.WithLabelValues(string(res.Provider)).Inc()
+					}
+					continue
+				case billing.Terminate:
+					// fall through to the single-tx delete
+				}
 			}
+		}
+		if err := r.costReclaim(ctx, res, nowMs); err == nil {
+			delete(r.missedBoundary, res.ID)
+			n++
+			costBudget--
 		}
 	}
 	return n, nil
+}
+
+// queuedAcq is a pending acquisition still inside its queue deadline.
+type queuedAcq struct {
+	acq     *storage.Acquisition
+	want    capacity.Vector
+	matched bool
+}
+
+func (r *Reconciler) queuedAcquisitions(ctx context.Context, nowMs int64) []*queuedAcq {
+	pend, err := r.st.Acquisitions().ListByState(ctx, storage.AcqPending)
+	if err != nil {
+		return nil
+	}
+	var out []*queuedAcq
+	for _, acq := range pend {
+		req, want, _, err := capacity.ParseRequest(acq.Constraints)
+		if err != nil {
+			continue
+		}
+		if req.MaxWaitMs > 0 && nowMs > acq.CreatedAt+req.MaxWaitMs {
+			continue // deadline passed; the sweep will force-scale it
+		}
+		out = append(out, &queuedAcq{acq: acq, want: want})
+	}
+	return out
+}
+
+// claimQueued greedily matches the resource against one unmatched queued
+// acquisition that could actually bind to it (kind, class, capacity fit) —
+// a queued request never protects a machine it can't use.
+func claimQueued(queued []*queuedAcq, res *storage.Resource) bool {
+	total, err := capacity.Parse(res.Capacity)
+	if err != nil {
+		return false
+	}
+	for _, q := range queued {
+		if q.matched || !satisfiable(q.acq, q.want, res, total) {
+			continue
+		}
+		q.matched = true
+		return true
+	}
+	return false
+}
+
+// satisfiable is the shared compatibility predicate (same terms as the
+// scheduler's rankedCandidates): kind and class match, capacity fits an
+// idle resource. An idle resource satisfies any exclusivity.
+func satisfiable(acq *storage.Acquisition, want capacity.Vector, res *storage.Resource, total capacity.Vector) bool {
+	if acq.Kind != res.Kind {
+		return false
+	}
+	if acq.Class != "" && acq.Class != res.Class {
+		return false
+	}
+	return capacity.Fits(total, capacity.Vector{}, want)
+}
+
+// effectiveBuffer applies the kernel floor and, when enabled for the kind,
+// the adaptive p95-based buffer (docs/11 §12): p95 of recent first-attempt
+// delete durations + 60s margin, floored by the static buffer and capped
+// at increment/2 (past that, window timing is meaningless — logged).
+// Cached per provider for a minute.
+func (r *Reconciler) effectiveBuffer(ctx context.Context, prov storage.ProviderInstance, kind string, pol provider.BillingPolicy) time.Duration {
+	base := billing.EffectiveBuffer(pol, r.cfg.Interval)
+	if _, adaptive := r.providers.Billing(prov, kind); !adaptive {
+		return base
+	}
+	nowMs := r.clock.Now().UnixMilli()
+	if e, ok := r.adaptiveCache[prov]; ok && nowMs-e.computedAt < 60_000 {
+		return maxDur(base, e.buffer)
+	}
+	var observed []time.Duration
+	if ops, err := r.st.Operations().RecentTerminal(ctx, prov, storage.OpKindDelete, 50); err == nil {
+		for _, op := range ops {
+			if op.Attempt <= 1 { // exclude backoff-polluted samples
+				observed = append(observed, time.Duration(op.UpdatedAt-op.CreatedAt)*time.Millisecond)
+			}
+		}
+	}
+	cap := pol.BillingIncrement / 2
+	buf := billing.AdaptiveBuffer(observed, base, time.Minute, cap)
+	if cap > 0 && buf == cap && len(observed) > 0 {
+		r.log.Warn("adaptive termination buffer capped at increment/2 — deletion latency dominates the billing window",
+			"provider", prov, "cap", cap.String())
+	}
+	r.adaptiveCache[prov] = adaptiveEntry{buffer: buf, computedAt: nowMs}
+	return maxDur(base, buf)
+}
+
+func maxDur(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// costReclaim journals the delete in ONE transaction with all gates
+// re-checked inside it; on any gate failure the resource stays Ready and
+// schedulable.
+func (r *Reconciler) costReclaim(ctx context.Context, res *storage.Resource, nowMs int64) error {
+	return r.st.Tx(ctx, func(tx storage.TxStore) error {
+		cur, err := tx.Resources().Get(ctx, res.ID)
+		if err != nil {
+			return err
+		}
+		if cur.DeletedAt != nil || cur.Phase != phase.Ready {
+			return fmt.Errorf("%w: not reclaimable", storage.ErrConflict)
+		}
+		// In-tx queued-work re-check: conservative — block when the number
+		// of satisfiable in-deadline pending acquisitions exceeds the other
+		// Ready compatible resources that would remain.
+		pend, err := tx.Acquisitions().ListByState(ctx, storage.AcqPending)
+		if err != nil {
+			return err
+		}
+		total, _ := capacity.Parse(cur.Capacity)
+		satis := 0
+		for _, acq := range pend {
+			req, want, _, err := capacity.ParseRequest(acq.Constraints)
+			if err != nil {
+				continue
+			}
+			if req.MaxWaitMs > 0 && nowMs > acq.CreatedAt+req.MaxWaitMs {
+				continue
+			}
+			if satisfiable(acq, want, cur, total) {
+				satis++
+			}
+		}
+		if satis > 0 {
+			others, err := tx.Resources().List(ctx, storage.ResourceFilter{
+				Kind: cur.Kind, Class: cur.Class,
+				Phases:    []phase.Phase{phase.Ready},
+				Ownership: []storage.Ownership{storage.OwnershipManaged},
+			})
+			if err != nil {
+				return err
+			}
+			remaining := 0
+			for _, o := range others {
+				if o.ID != cur.ID && o.DeletedAt == nil {
+					remaining++
+				}
+			}
+			if satis > remaining {
+				return fmt.Errorf("%w: queued acquisitions waiting", storage.ErrConflict)
+			}
+		}
+		return r.journalDeleteInTx(ctx, tx, cur, nowMs, "cost-reclaim")
+	})
 }
 
 // Delta reports what one cycle decided.
@@ -403,7 +612,8 @@ func (r *Reconciler) createOne(ctx context.Context, pool *storage.Pool, kind, pr
 }
 
 // journalDelete journals a provider delete with every deletion gate
-// re-checked INSIDE the transaction (invariants 3, 5).
+// re-checked INSIDE the transaction (invariants 3, 5) — the two-step
+// (drain-then-delete) path for explicit drains and failed cleanup.
 func (r *Reconciler) journalDelete(ctx context.Context, res *storage.Resource, nowMs int64) error {
 	return r.st.Tx(ctx, func(tx storage.TxStore) error {
 		cur, err := tx.Resources().Get(ctx, res.ID)
@@ -413,45 +623,52 @@ func (r *Reconciler) journalDelete(ctx context.Context, res *storage.Resource, n
 		if cur.DeletedAt != nil || (cur.Phase != phase.Draining && cur.Phase != phase.Failed) {
 			return fmt.Errorf("%w: not deletable", storage.ErrConflict)
 		}
-		if cur.Ownership != storage.OwnershipManaged || cur.DeleteProtected {
-			return fmt.Errorf("%w: ownership/protection gate", storage.ErrConflict)
-		}
-		if n, err := tx.Leases().CountActive(ctx, res.ID); err != nil {
-			return err
-		} else if n > 0 {
-			return fmt.Errorf("%w: active leases", storage.ErrConflict)
-		}
-		if cur.ExternalID == nil {
-			// Never materialized: tombstone directly (any ghost carries
-			// our op label and is collapsed by discovery, plan R8).
-			return tx.Resources().MarkDeleted(ctx, res.ID, nowMs)
-		}
-		if err := tx.Resources().CASPhase(ctx, res.ID, cur.Phase, phase.Deleting, nowMs); err != nil {
-			return err
-		}
-		var ref provider.ExternalRef
-		if len(cur.ExternalRef) > 0 {
-			_ = json.Unmarshal(cur.ExternalRef, &ref)
-		}
-		if ref.ID == "" {
-			ref.ID = *cur.ExternalID
-		}
-		opID := newOpID()
-		action := provider.Action{ActionID: string(opID), Kind: "delete", ResourceID: string(res.ID), Ref: &ref, Destructive: true}
-		actionJSON, _ := json.Marshal(action)
-		op := &storage.Operation{
-			ID: opID, Kind: storage.OpKindDelete, ResourceID: &res.ID, PoolID: cur.PoolID,
-			Provider: cur.Provider, Action: actionJSON, State: storage.OpJournaled,
-			CreatedAt: nowMs, UpdatedAt: nowMs,
-		}
-		if err := tx.Operations().Append(ctx, op); err != nil {
-			return err
-		}
-		return tx.Events().Append(ctx, &storage.Event{
-			TS: nowMs, Actor: "reconciler", Type: "resource.delete",
-			ResourceID: &res.ID, PoolID: cur.PoolID, OperationID: &opID,
-			Provider: cur.Provider, Outcome: "journaled",
-		})
+		return r.journalDeleteInTx(ctx, tx, cur, nowMs, "reconciler")
+	})
+}
+
+// journalDeleteInTx is the shared in-tx delete core (ownership, protection
+// and lease gates + CAS to Deleting + journaled op + event). The caller has
+// already fetched cur in this tx and verified its phase.
+func (r *Reconciler) journalDeleteInTx(ctx context.Context, tx storage.TxStore, cur *storage.Resource, nowMs int64, actor string) error {
+	if cur.Ownership != storage.OwnershipManaged || cur.DeleteProtected {
+		return fmt.Errorf("%w: ownership/protection gate", storage.ErrConflict)
+	}
+	if n, err := tx.Leases().CountActive(ctx, cur.ID); err != nil {
+		return err
+	} else if n > 0 {
+		return fmt.Errorf("%w: active leases", storage.ErrConflict)
+	}
+	if cur.ExternalID == nil {
+		// Never materialized: tombstone directly (any ghost carries
+		// our op label and is collapsed by discovery, plan R8).
+		return tx.Resources().MarkDeleted(ctx, cur.ID, nowMs)
+	}
+	if err := tx.Resources().CASPhase(ctx, cur.ID, cur.Phase, phase.Deleting, nowMs); err != nil {
+		return err
+	}
+	var ref provider.ExternalRef
+	if len(cur.ExternalRef) > 0 {
+		_ = json.Unmarshal(cur.ExternalRef, &ref)
+	}
+	if ref.ID == "" {
+		ref.ID = *cur.ExternalID
+	}
+	opID := newOpID()
+	action := provider.Action{ActionID: string(opID), Kind: "delete", ResourceID: string(cur.ID), Ref: &ref, Destructive: true}
+	actionJSON, _ := json.Marshal(action)
+	op := &storage.Operation{
+		ID: opID, Kind: storage.OpKindDelete, ResourceID: &cur.ID, PoolID: cur.PoolID,
+		Provider: cur.Provider, Action: actionJSON, State: storage.OpJournaled,
+		CreatedAt: nowMs, UpdatedAt: nowMs,
+	}
+	if err := tx.Operations().Append(ctx, op); err != nil {
+		return err
+	}
+	return tx.Events().Append(ctx, &storage.Event{
+		TS: nowMs, Actor: actor, Type: "resource.delete",
+		ResourceID: &cur.ID, PoolID: cur.PoolID, OperationID: &opID,
+		Provider: cur.Provider, Outcome: "journaled",
 	})
 }
 

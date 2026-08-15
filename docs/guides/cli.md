@@ -226,6 +226,7 @@ new one from `--class` (design docs, [08 §3](../08_HETZNER_RUNNER_USE_CASE.md))
 | `--memory-mib` | `0` | Minimum memory in MiB |
 | `--exclusive` | `false` | Whole-machine lease (implied when no constraints are given) |
 | `--ttl` | — | Lease TTL, e.g. `90m` |
+| `--max-wait` | — | Queue budget, e.g. `10m`: wait for existing capacity before scaling up (needs server >= v0.4) |
 | `--idempotency-key` | — | Idempotency key |
 
 `--cpu`/`--memory-mib` become the constraints body
@@ -269,7 +270,9 @@ printing each state transition.
 
 Success means `bound` for acquisitions and `succeeded` for operations. A terminal
 failure (`failed`, `expired`, `released` / `failed`, `aborted`) or a timeout exits with
-code 6.
+code 6. A queued acquisition (`fleetplane acquire --max-wait`) may legitimately stay
+`pending` for up to its whole queue budget before force-scaling, so give `--timeout`
+at least the `--max-wait` value plus provisioning headroom.
 
 ```bash
 fleetplane watch acq_01J8FYKF7H2K5N8Q1T4V9X0CED --timeout 5m

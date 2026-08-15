@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/capacity"
 	"github.com/samishal1998/fleetplane/internal/storage"
 	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
@@ -41,6 +42,14 @@ func (s *Server) createAcquisition(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var maxWait time.Duration
+	if req.MaxWait != "" {
+		maxWait, err = time.ParseDuration(req.MaxWait)
+		if err != nil || maxWait < 0 {
+			writeError(w, reqID, http.StatusBadRequest, "invalid", "maxWait: must be a non-negative Go duration", false)
+			return
+		}
+	}
 	// The body's idempotencyKey (04 §4) and the header must agree.
 	idemKey := r.Header.Get("Idempotency-Key")
 	if req.IdempotencyKey != "" {
@@ -56,7 +65,7 @@ func (s *Server) createAcquisition(w http.ResponseWriter, r *http.Request) {
 	out, err := s.app.Acquire(r.Context(), app.AcquireCmd{
 		Kind: req.Kind, Class: req.Class,
 		Constraints: req.Constraints, Exclusive: req.Exclusive,
-		Quantity: req.Quantity, TTL: ttl,
+		Quantity: req.Quantity, TTL: ttl, MaxWait: maxWait,
 		Actor: actor, IdemKey: idemKey,
 		IdemScope:   "POST /v1/acquisitions|" + actor,
 		RequestHash: hex.EncodeToString(sum[:]),
@@ -101,6 +110,13 @@ func toAcqEnvelope(a *storage.Acquisition) apiclient.Acquisition {
 	}
 	if a.PendingResourceID != nil {
 		env.ResourceID = string(*a.PendingResourceID)
+	}
+	// The queue contract is resolved at accept time and stored in the
+	// request payload — deterministic, so safe in replayed accept bodies.
+	if req, _, _, err := capacity.ParseRequest(a.Constraints); err == nil && req.MaxWaitMs > 0 {
+		env.MaxWait = (time.Duration(req.MaxWaitMs) * time.Millisecond).String()
+		dl := time.UnixMilli(a.CreatedAt + req.MaxWaitMs).UTC()
+		env.QueueDeadline = &dl
 	}
 	return env
 }

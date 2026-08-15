@@ -21,10 +21,11 @@ is at the [end of the page](#complete-annotated-example).
 **Durations** are Go duration strings: `"20s"`, `"1m30s"`, `"15m"`. An
 invalid duration (e.g. `shutdownGrace: soon`) is a boot error.
 
-Several sections (`engine`, `reconcile`, `acquire`, `discovery`) have no
-config-file defaults at all: leaving a key out (or zero) defers to the
-engine's built-in defaults per [ADR-014](../adr/ADR-014-retries.md). The
-tables below note these as "when zero".
+Several sections (`engine`, `reconcile`, `discovery`) have no config-file
+defaults at all: leaving a key out (or zero) defers to the engine's built-in
+defaults per [ADR-014](../adr/ADR-014-retries.md). The tables below note
+these as "when zero". (`acquire.pendingTimeout` is the exception: it is
+defaulted at config load — see [acquire](#acquire).)
 
 ## Top-level layout
 
@@ -85,6 +86,7 @@ are fine.
 |---|---|---|---|
 | `providers.<name>.driver` | string | **required** | One of `hetzner`, `digitalocean`, `fake`. A provider without a driver is a boot error. |
 | `providers.<name>.settings` | map | — | Raw driver config block, decoded by the driver itself (tables below). |
+| `providers.<name>.billing` | map | — | Per-kind billing-policy overrides for cost-aware leasing ([below](#billing-providersnamebilling)). |
 
 Provider instances are constructed at boot: a bad settings block, a missing
 credential, or an unresolvable `secret://` reference fails `fleetplane
@@ -204,6 +206,51 @@ providers:
     settings: {}
 ```
 
+### Billing (`providers.<name>.billing`)
+
+Optional per-kind overrides of the driver's billing policy — the input to
+cost-aware leasing ([design doc 11](../11_COST_AWARE_LEASING.md),
+[ADR-018](../adr/ADR-018-cost-aware-leasing.md); the behavior it enables is
+explained in [concepts → cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)).
+`billing` is a map of **resource kind** → override; override kinds are
+validated against the driver's declared kinds at boot, so a typo'd or
+unserved kind is a boot error.
+
+| Key | Type | Default | Behavior |
+|---|---|---|---|
+| `billing.<kind>.minimumDuration` | duration | driver's value | Shortest period the provider ever bills (`0` = none). Must be >= 0. |
+| `billing.<kind>.increment` | duration | driver's value | Billing granularity after the minimum (`0` = fine-grained, per-use). Must be >= 0. |
+| `billing.<kind>.terminationBuffer` | duration | driver's value | How long before a billing boundary a delete is dispatched so provider-side termination completes inside the paid window. Must be >= 0. |
+| `billing.<kind>.adaptive` | bool | `false` | Derive the termination buffer from observed provider deletion durations (p95 + margin, floored by `terminationBuffer`, capped at half the increment). |
+| `billing.<kind>.disabled` | bool | `false` | Explicit opt-out: the kind gets the zero (fine-grained) policy and no billing-window behavior. May not be combined with the other fields — that is a boot error. |
+
+Overrides **merge field-wise** over the driver's declared policy: an unset
+field keeps the driver's value, so a partial override never silently zeroes
+the rest. The shipped driver defaults:
+
+| Driver | Default billing policy |
+|---|---|
+| `hetzner` | Hourly increment + `5m` termination buffer for `compute.machine` |
+| `digitalocean` | Hourly increment + `5m` termination buffer for `compute.machine` only |
+| `fake` | Whatever its `settings.billing` block declares (zero policy by default) |
+
+A kind with the zero policy — no driver declaration, no override — gets
+fine-grained billing: ordinary lease and idle reclamation, no billing-window
+scheduling. Cost-aware behavior is therefore **off by default** and per
+provider instance, per kind.
+
+```yaml
+providers:
+  hetzner-main:
+    driver: hetzner
+    settings:
+      token: secret://env/HETZNER_TOKEN
+    billing:
+      compute.machine:
+        terminationBuffer: 10m   # partial override — increment stays hourly
+        adaptive: true           # learn the buffer from observed deletes
+```
+
 ## classes
 
 Classes are reusable creation templates (see the design docs,
@@ -216,6 +263,7 @@ Classes are reusable creation templates (see the design docs,
 | `classes.<name>.provider` | string | **required** | Name of a configured provider instance. Referencing an unknown provider is a boot error. |
 | `classes.<name>.spec` | map | — | Kind-specific spec (below). Provider-specific extra fields are allowed and passed through to the driver. |
 | `classes.<name>.reclaim.idleAfter` | duration | — | Poolless idle reclamation (below). Absent = never auto-reclaimed. |
+| `classes.<name>.scheduling.queue.maxWait` | duration | — | Queue budget for acquisitions of this class (below). Absent/`0` = provision immediately. |
 
 ### `compute.machine` spec
 
@@ -311,6 +359,34 @@ classes:
       idleAfter: 5m
 ```
 
+### `scheduling.queue.maxWait`
+
+The class's cost/latency tradeoff for
+[cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows): with
+`maxWait` set, acquisitions of this class **wait for existing or in-flight
+capacity** for up to this long before scaling up (sequential lease packing).
+At the deadline the scheduler force-scales — a queued acquisition never waits
+past its budget. `0` or absent means provision immediately (the previous
+behavior). A per-request `maxWait` (API/CLI) overrides the class default.
+
+Validation: must be >= 0 and must not exceed `acquire.pendingTimeout` — a
+larger value is a boot error. The effective per-acquisition value is
+additionally clamped to `pendingTimeout - 10s` at accept time (see
+[acquire](#acquire)).
+
+```yaml
+classes:
+  ci-large:
+    kind: compute.machine
+    provider: hetzner-main
+    spec:
+      serverType: cpx31
+      image: "snapshot:ci-runner=v12"
+    scheduling:
+      queue:
+        maxWait: 10m    # cost-oriented: pack work into already-paid windows
+```
+
 ## engine
 
 Tunes the operation engine — the component that executes every provider
@@ -347,7 +423,12 @@ reconcile:
 
 | Key | Type | Default | Behavior |
 |---|---|---|---|
-| `acquire.pendingTimeout` | duration | `15m` when zero | Acquisitions that were never satisfied (no capacity, provider down) expire to `failed` after this long instead of pending forever. |
+| `acquire.pendingTimeout` | duration | `15m` | Acquisitions that were never satisfied (no capacity, provider down) expire after this long instead of pending forever. Defaulted **at config load** (not deep in the engine), so the queue clamp below and the expiry sweep always see the same effective value. |
+
+An acquisition's queue budget — the request's `maxWait`, else the class's
+`scheduling.queue.maxWait` — is clamped to `pendingTimeout - 10s` at accept
+time. Clamped, never rejected: rejecting against a config-dependent limit
+would break byte-identical idempotent replays.
 
 ```yaml
 acquire:
@@ -467,6 +548,11 @@ providers:
     settings:
       token: secret://env/HETZNER_TOKEN
       location: fsn1           # default location; spec.location wins
+    # billing:                 # cost-aware leasing: per-kind overrides that
+    #   compute.machine:       #   merge field-wise over the driver's defaults
+    #     terminationBuffer: 10m
+    #     adaptive: true       # learn the buffer from observed deletes
+    #     # disabled: true     # or: opt the kind out entirely (alone, no other fields)
   do-fra1:
     driver: digitalocean
     settings:
@@ -491,6 +577,9 @@ classes:
         budget: 3m                       #   budget 5m, successThreshold 1
     reclaim:
       idleAfter: 5m                      # idle + no leases for 5m -> deleted
+    # scheduling:
+    #   queue:
+    #     maxWait: 10m                   # queue for existing capacity before scaling up
 
 engine:
   pollInterval: 2s             # fallback wake-up; kicks are primary
@@ -501,7 +590,7 @@ reconcile:
   maxMutationsPerCycle: 5      # blast-radius cap per cycle
 
 acquire:
-  pendingTimeout: 15m          # never-satisfied acquisitions expire
+  pendingTimeout: 15m          # never-satisfied acquisitions expire; also caps maxWait
 
 discovery:
   interval: 30s
@@ -527,8 +616,10 @@ auth:
   (tokens, secrets, ops listener),
   [API & resource model](../04_API_AND_RESOURCE_MODEL.md) (classes, kinds),
   [reconciliation & scheduling](../05_RECONCILIATION_AND_SCHEDULING.md)
-  (pools, discovery)
+  (pools, discovery),
+  [cost-aware leasing](../11_COST_AWARE_LEASING.md) (billing windows, queueing)
 - ADRs: [ADR-007 config & secrets](../adr/ADR-007-config.md),
   [ADR-008 tokens](../adr/ADR-008-tokens.md),
   [ADR-014 retries](../adr/ADR-014-retries.md),
-  [ADR-017 operation states, ghosts & orphans](../adr/ADR-017-operation-states.md)
+  [ADR-017 operation states, ghosts & orphans](../adr/ADR-017-operation-states.md),
+  [ADR-018 cost-aware leasing](../adr/ADR-018-cost-aware-leasing.md)

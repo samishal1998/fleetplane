@@ -20,6 +20,10 @@ import (
 // to operations.Providers).
 type Providers interface {
 	Instance(name storage.ProviderInstance) (provider.Provider, bool)
+	// Billing resolves the effective billing policy for an instance+kind
+	// (config override > driver capability > zero, docs/11 §3–4); the bool
+	// reports whether the adaptive termination buffer is enabled.
+	Billing(name storage.ProviderInstance, kind string) (provider.BillingPolicy, bool)
 }
 
 type CreateSpec struct {

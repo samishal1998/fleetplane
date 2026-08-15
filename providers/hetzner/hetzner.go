@@ -89,6 +89,17 @@ func New(ctx context.Context, cfg provider.InstanceConfig) (*Hetzner, error) {
 
 // --- provider.Provider ---
 
+// Billing implements provider.BillingAware: Hetzner bills servers per
+// started hour (docs/11 §3). Only declared kinds get a policy (the
+// capability contract); volumes join when the driver serves them.
+// Override or disable per kind via providers.<name>.billing in the config.
+func (h *Hetzner) Billing(kind provider.ResourceKind) provider.BillingPolicy {
+	if kind == compute.Kind {
+		return provider.BillingPolicy{BillingIncrement: time.Hour, TerminationBuffer: 5 * time.Minute}
+	}
+	return provider.BillingPolicy{}
+}
+
 func (h *Hetzner) Descriptor() provider.Descriptor {
 	return provider.Descriptor{
 		Driver: Driver, Instance: h.instance, Version: "hcloud-go/v2",

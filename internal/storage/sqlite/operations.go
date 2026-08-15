@@ -102,6 +102,16 @@ func (os operationStore) NonTerminal(ctx context.Context) ([]*storage.Operation,
 	return collectOps(rows)
 }
 
+func (os operationStore) RecentTerminal(ctx context.Context, provider storage.ProviderInstance, kind storage.OpKind, limit int) ([]*storage.Operation, error) {
+	rows, err := os.q.QueryContext(ctx,
+		`SELECT `+opCols+` FROM operations WHERE provider=? AND kind=? AND state='succeeded'
+		 ORDER BY updated_at DESC LIMIT ?`, string(provider), string(kind), limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return collectOps(rows)
+}
+
 func (os operationStore) CountPending(ctx context.Context, pool storage.PoolID, kind storage.OpKind) (int, error) {
 	var n int
 	err := os.q.QueryRowContext(ctx,

@@ -13,6 +13,10 @@ type AcquireRequest struct {
 	Constraints json.RawMessage `json:"constraints,omitempty"` // {"cpu":{"min":2},...}
 	Exclusive   bool            `json:"exclusive,omitempty"`
 	Lease       *LeaseRequest   `json:"lease,omitempty"`
+	// MaxWait (Go duration, e.g. "10m") lets the acquisition queue for
+	// existing capacity before scaling up (docs/11 §8); empty falls back
+	// to the class default. Requires a server >= v0.4.
+	MaxWait string `json:"maxWait,omitempty"`
 	// IdempotencyKey may come in the body (04 §4) or the header; when both
 	// are set they must agree.
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
@@ -24,17 +28,21 @@ type LeaseRequest struct {
 
 // Acquisition is the acquisition envelope.
 type Acquisition struct {
-	APIVersion   string    `json:"apiVersion"`
-	Kind         string    `json:"kind"` // "Acquisition"
-	ID           string    `json:"id"`
-	State        string    `json:"state"` // pending|provisioning|bound|failed|released|expired
-	Class        string    `json:"class,omitempty"`
-	ResourceKind string    `json:"resourceKind,omitempty"`
-	ResourceID   string    `json:"resourceId,omitempty"`
-	LeaseID      string    `json:"leaseId,omitempty"`
-	Actor        string    `json:"actor,omitempty"`
-	CreatedAt    time.Time `json:"createdAt,omitzero"`
-	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
+	APIVersion   string `json:"apiVersion"`
+	Kind         string `json:"kind"` // "Acquisition"
+	ID           string `json:"id"`
+	State        string `json:"state"` // pending|provisioning|bound|failed|released|expired
+	Class        string `json:"class,omitempty"`
+	ResourceKind string `json:"resourceKind,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	LeaseID      string `json:"leaseId,omitempty"`
+	Actor        string `json:"actor,omitempty"`
+	// MaxWait/QueueDeadline surface the resolved queue contract (accept-
+	// time deterministic, so they are safe in idempotent replays).
+	MaxWait       string     `json:"maxWait,omitempty"`
+	QueueDeadline *time.Time `json:"queueDeadline,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt,omitzero"`
+	UpdatedAt     time.Time  `json:"updatedAt,omitzero"`
 }
 
 // PoolManifest is the POST/PUT pool body (04 §5): spec is the reconcile
