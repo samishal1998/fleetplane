@@ -30,6 +30,7 @@ import (
 	"github.com/samimishal/fleetplane/internal/scheduler"
 	"github.com/samimishal/fleetplane/internal/storage"
 	"github.com/samimishal/fleetplane/internal/storage/sqlite"
+	"github.com/samimishal/fleetplane/internal/webui"
 	"github.com/samimishal/fleetplane/pkg/kinds/compute"
 	"github.com/samimishal/fleetplane/pkg/sdk"
 	"github.com/samimishal/fleetplane/pkg/sdk/secretref"
@@ -197,6 +198,11 @@ func (a *App) Serve(ctx context.Context) error {
 	mainMux := http.NewServeMux()
 	mainMux.Handle("/health/", health)
 	mainMux.Handle("/v1/", a.mutationGate(a.api.Handler()))
+	// Embedded dashboard: static assets are public; all data flows through
+	// the authenticated /v1 API above.
+	mainMux.Handle("GET /ui/", webui.Handler())
+	mainMux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
+	mainMux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
 
 	// Ops listener (loopback by default): metrics, pprof, admin backup.
 	// Never expose it on an untrusted network (07 §7 runbook note).

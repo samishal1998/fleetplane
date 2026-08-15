@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <path id="p" d="M0 -52 L-34 40 L0 21 L34 40 Z"/>
+  </defs>
+  <use href="#p" transform="translate(70 120) rotate(45)" fill="#7c8496" opacity="0.8"/>
+  <use href="#p" transform="translate(136 186) rotate(45)" fill="#7c8496" opacity="0.5"/>
+  <use href="#p" transform="translate(150 106) rotate(45)" fill="#6366f1"/>
+</svg>
