@@ -117,11 +117,12 @@ func operationsCmd(r *root) *cobra.Command {
 
 func eventsCmd(r *root) *cobra.Command {
 	var since, after string
+	var limit int
 	cmd := &cobra.Command{
 		Use:   "events",
 		Short: "List audit events",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			events, err := r.client().ListEvents(cmd.Context(), after, since, 100)
+			events, err := r.client().ListEvents(cmd.Context(), after, since, limit)
 			if err != nil {
 				return err
 			}
@@ -139,6 +140,7 @@ func eventsCmd(r *root) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&since, "since", "", "look-back window, e.g. 1h")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: return events after this evt_ id")
+	cmd.Flags().IntVar(&limit, "limit", 100, "maximum events to return (server cap 1000)")
 	return cmd
 }
 

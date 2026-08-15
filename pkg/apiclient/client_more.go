@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 func (c *Client) Acquire(ctx context.Context, req AcquireRequest, idemKey string) (*Acquisition, error) {
@@ -83,7 +84,7 @@ func (c *Client) ListEvents(ctx context.Context, after, since string, limit int)
 		q.Set("since", since)
 	}
 	if limit > 0 {
-		q.Set("limit", "100")
+		q.Set("limit", strconv.Itoa(limit))
 	}
 	path := "/v1/events"
 	if enc := q.Encode(); enc != "" {

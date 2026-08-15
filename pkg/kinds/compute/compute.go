@@ -72,8 +72,8 @@ func (s *MachineSpec) Validate() error {
 }
 
 // ReadinessSpec configures the workload readiness gate executed by the
-// operation engine after provider-level success (plan R16). v1 implements
-// TCP only; HTTP parses but is rejected at validation (seam kept, ADR).
+// operation engine after provider-level success (plan R16). Exactly one of
+// tcp or http must be set.
 type ReadinessSpec struct {
 	TCP  *TCPProbe  `json:"tcp,omitempty"`
 	HTTP *HTTPProbe `json:"http,omitempty"`
