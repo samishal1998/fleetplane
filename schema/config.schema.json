@@ -1,0 +1,948 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/samishal1998/fleetplane/main/schema/config.schema.json",
+  "title": "Fleetplane configuration",
+  "description": "Configuration file for `fleetplane serve` (ADR-007). Decoding is STRICT: any key not defined here is a boot error. Durations are Go duration strings (\"20s\", \"1m30s\", \"15m\"). Credentials should always be secret:// references (secret://env/NAME or secret://file/PATH), never plaintext.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["storage"],
+  "properties": {
+    "server": {
+      "$ref": "#/definitions/server"
+    },
+    "storage": {
+      "$ref": "#/definitions/storage"
+    },
+    "providers": {
+      "title": "Provider instances",
+      "description": "Map of instance name (yours to choose: hetzner-main, do-fra1, ...) to provider configuration. Two instances of the same driver are fine. Instances are constructed at boot: a bad settings block, a missing credential, or an unresolvable secret:// reference fails `fleetplane serve` immediately.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/provider"
+      }
+    },
+    "classes": {
+      "title": "Classes (creation templates)",
+      "description": "Map of class name to reusable creation template (docs 04 §2). A resource created \"from class X\" expands the class spec; pools also target classes. A class referencing an unknown provider is a boot error.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/class"
+      }
+    },
+    "engine": {
+      "$ref": "#/definitions/engine"
+    },
+    "reconcile": {
+      "$ref": "#/definitions/reconcile"
+    },
+    "acquire": {
+      "$ref": "#/definitions/acquire"
+    },
+    "discovery": {
+      "$ref": "#/definitions/discovery"
+    },
+    "auth": {
+      "$ref": "#/definitions/auth"
+    }
+  },
+  "definitions": {
+    "duration": {
+      "type": "string",
+      "title": "Duration",
+      "description": "Go duration string (time.ParseDuration): decimal numbers each with a unit suffix, optionally concatenated. Valid units: ns, us, µs, ms, s, m, h. An invalid duration is a boot error.",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))*$",
+      "examples": ["20s", "1m30s", "15m", "1.5h"]
+    },
+    "secretRef": {
+      "type": "string",
+      "title": "secret:// reference",
+      "description": "Secret reference resolved at boot and never logged or persisted (ADR-007, docs 07 §4). Schemes: secret://env/NAME reads the environment variable NAME (unset variable is a boot error); secret://file/PATH reads the file at the absolute path /PATH (one trailing newline trimmed; unreadable file is a boot error).",
+      "pattern": "^secret://(env/[A-Za-z_][A-Za-z0-9_]*|file/.+)$",
+      "examples": ["secret://env/HETZNER_TOKEN", "secret://file/etc/fleetplane/token"]
+    },
+    "server": {
+      "title": "server",
+      "description": "Listen addresses and graceful shutdown (docs 07 §9).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "addr": {
+          "title": "Main API listen address",
+          "description": "Serves /v1/*, /health/*, and the embedded web dashboard at /ui/ (/ redirects there). Default \":8080\".",
+          "type": "string",
+          "examples": [":8080"]
+        },
+        "opsAddr": {
+          "title": "Ops listen address",
+          "description": "Serves /metrics (Prometheus), /debug/pprof/*, and POST /admin/backup. Default \"127.0.0.1:9090\". Keep it loopback-only unless the network is trusted.",
+          "type": "string",
+          "examples": ["127.0.0.1:9090"]
+        },
+        "shutdownGrace": {
+          "title": "Graceful shutdown bound",
+          "description": "Bound on graceful shutdown: readiness flips to false, in-flight HTTP drains within this window, then providers and the store close. In-flight provider operations resume from the journal on next boot. Default 20s.",
+          "examples": ["20s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        }
+      }
+    },
+    "storage": {
+      "title": "storage",
+      "description": "Persistent state location. Fleetplane uses SQLite in WAL mode (ADR-003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "title": "SQLite database file path",
+          "description": "REQUIRED. Missing or empty is a boot error (`storage.path is required`).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["/var/lib/fleetplane/fleetplane.db"]
+        }
+      }
+    },
+    "provider": {
+      "title": "Provider instance",
+      "description": "One provider instance (docs 03 §4): a driver plus its raw settings block, and optional per-kind billing overrides.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver"],
+      "properties": {
+        "driver": {
+          "title": "Driver name",
+          "description": "REQUIRED. Which driver implements this instance. The shape of `settings` depends on this value.",
+          "type": "string",
+          "enum": ["fake", "hetzner", "digitalocean", "aws", "gcp"]
+        },
+        "settings": {
+          "title": "Driver settings",
+          "description": "Raw driver config block, decoded by the driver itself at boot; the shape depends on the sibling `driver`. Credentials inside must be secret:// references (secret://env/NAME or secret://file/PATH).",
+          "type": ["object", "null"]
+        },
+        "billing": {
+          "title": "Billing overrides (per resource kind)",
+          "description": "Optional per-kind overrides of the driver's billing policy — the input to cost-aware leasing (docs 11, ADR-018). Map of resource kind (e.g. compute.machine) to override. Overrides merge field-wise over the driver's declared policy: an unset field keeps the driver's value. Override kinds are validated against the driver's declared kinds at boot.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z][a-z0-9]*\\.[a-z][a-z0-9]*$": {
+              "$ref": "#/definitions/billingOverride"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "driver": { "const": "fake" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "properties": { "settings": { "$ref": "#/definitions/fakeSettings" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "driver": { "const": "hetzner" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "required": ["settings"],
+            "properties": { "settings": { "$ref": "#/definitions/hetznerSettings" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "driver": { "const": "digitalocean" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "required": ["settings"],
+            "properties": { "settings": { "$ref": "#/definitions/digitaloceanSettings" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "driver": { "const": "aws" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "required": ["settings"],
+            "properties": { "settings": { "$ref": "#/definitions/awsSettings" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "driver": { "const": "gcp" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "required": ["settings"],
+            "properties": { "settings": { "$ref": "#/definitions/gcpSettings" } }
+          }
+        }
+      ]
+    },
+    "billingOverride": {
+      "title": "Billing override for one kind",
+      "description": "Tunes one kind's billing policy (docs 11). Fields merge over the driver's declared policy; `disabled: true` is the explicit opt-out and may not be combined with the other fields (boot error).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "disabled": {
+          "title": "Opt out of billing-window behavior",
+          "description": "Explicit opt-out: the kind gets the zero (fine-grained) policy and no billing-window behavior. May NOT be combined with the other fields — that is a boot error.",
+          "type": "boolean"
+        },
+        "minimumDuration": {
+          "title": "Minimum billed duration",
+          "description": "Shortest period the provider ever bills (0 = none). Must be >= 0. Unset keeps the driver's value.",
+          "examples": ["1m"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "increment": {
+          "title": "Billing increment",
+          "description": "Billing granularity after the minimum (0 = fine-grained, per-use). Must be >= 0. Unset keeps the driver's value.",
+          "examples": ["1h"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "terminationBuffer": {
+          "title": "Termination buffer",
+          "description": "How long before a billing boundary a delete is dispatched so provider-side termination completes inside the paid window. Must be >= 0. Unset keeps the driver's value.",
+          "examples": ["5m"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "adaptive": {
+          "title": "Adaptive termination buffer",
+          "description": "Derive the termination buffer from observed provider deletion durations (p95 + margin, floored by terminationBuffer, capped at half the increment — docs 11 §12).",
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "disabled": { "const": true } },
+            "required": ["disabled"]
+          },
+          "then": {
+            "description": "disabled: true may not be combined with the other billing fields (boot error).",
+            "properties": { "adaptive": { "const": false } },
+            "not": {
+              "anyOf": [
+                { "required": ["minimumDuration"] },
+                { "required": ["increment"] },
+                { "required": ["terminationBuffer"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "fakeSettings": {
+      "title": "fake driver settings",
+      "description": "In-memory provider serving compute.machine and storage.volume, used by tests and conformance suites. No credentials. The zero value is fully synchronous (creates land running, lists see everything at once); the knobs introduce deterministic asynchrony. Unknown keys are rejected at boot.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "createSteps": {
+          "title": "Create steps",
+          "description": "ObserveOperation calls until a create lands `running`. 0 (default) = creates land running immediately.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "deleteSteps": {
+          "title": "Delete steps",
+          "description": "ObserveOperation calls until a delete lands gone. 0 (default) = deletes complete immediately.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "listLagSteps": {
+          "title": "List lag steps",
+          "description": "Discover calls before a new object becomes listable (list-consistency lag). 0 (default) = immediately listable.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pageSize": {
+          "title": "Discover page size",
+          "description": "Internal Discover pagination chunk (0 = single page).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "billing": {
+          "title": "Declared billing policies (per kind)",
+          "description": "Per-kind billing policies the fake driver declares (docs 11) — the test control for billing-window behavior. Map of resource kind (e.g. compute.machine) to policy.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z][a-z0-9]*\\.[a-z][a-z0-9]*$": {
+              "$ref": "#/definitions/fakeBillingSettings"
+            }
+          }
+        }
+      }
+    },
+    "fakeBillingSettings": {
+      "title": "fake billing policy for one kind",
+      "description": "One kind's declared billing policy (docs 11): minimum, increment, and termination buffer as Go duration strings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minimumDuration": {
+          "title": "Minimum billed duration",
+          "description": "Shortest period ever billed (0 = none).",
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "increment": {
+          "title": "Billing increment",
+          "description": "Billing granularity after the minimum.",
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "terminationBuffer": {
+          "title": "Termination buffer",
+          "description": "How long before a billing boundary a delete is dispatched.",
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        }
+      }
+    },
+    "hetznerSettings": {
+      "title": "hetzner driver settings",
+      "description": "Drives compute.machine on Hetzner Cloud via the official hcloud-go v2 SDK. SDK-level retries are disabled — the operation engine is the only retry authority (ADR-014). Default billing policy: hourly increment + 5m termination buffer for compute.machine.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token"],
+      "properties": {
+        "token": {
+          "title": "Hetzner Cloud API token",
+          "description": "REQUIRED. Use a secret:// reference — secret://env/NAME or secret://file/PATH. A plain literal is used as the credential as-is (it will work, but the token then sits in plaintext in the config file — don't do this outside throwaway experiments).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["secret://env/HETZNER_TOKEN"]
+        },
+        "location": {
+          "title": "Default server location",
+          "description": "Default placement for created servers (e.g. fsn1). A class spec's `location` wins over this.",
+          "type": "string",
+          "examples": ["fsn1", "nbg1", "hel1"]
+        },
+        "endpoint": {
+          "title": "API endpoint override",
+          "description": "Test override of the Hetzner API endpoint. Leave unset in production.",
+          "type": "string"
+        },
+        "rps": {
+          "title": "Requests per second",
+          "description": "Request-rate limit toward the Hetzner API. 5 when zero/unset.",
+          "type": "number",
+          "minimum": 0
+        },
+        "burst": {
+          "title": "Rate-limiter burst",
+          "description": "Rate-limiter burst size. 10 when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxConcurrent": {
+          "title": "Max concurrent API calls",
+          "description": "Maximum concurrent in-flight API calls. 5 when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "digitaloceanSettings": {
+      "title": "digitalocean driver settings",
+      "description": "Drives compute.machine on DigitalOcean droplets via godo. Same retry stance as Hetzner: the engine owns all retries. Default billing policy: hourly increment + 5m termination buffer for compute.machine.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token"],
+      "properties": {
+        "token": {
+          "title": "DigitalOcean API token",
+          "description": "REQUIRED. Use a secret:// reference — secret://env/NAME or secret://file/PATH. A plain literal is used as the credential as-is (plaintext in the config file — avoid).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["secret://env/DO_TOKEN"]
+        },
+        "region": {
+          "title": "Default droplet region",
+          "description": "Default placement for created droplets (e.g. fra1). A class spec's `location` wins over this.",
+          "type": "string",
+          "examples": ["fra1", "nyc3", "ams3"]
+        },
+        "endpoint": {
+          "title": "API endpoint override",
+          "description": "Test override of the DigitalOcean API endpoint. Leave unset in production.",
+          "type": "string"
+        },
+        "rps": {
+          "title": "Requests per second",
+          "description": "Request-rate limit toward the DigitalOcean API. 5 when zero/unset.",
+          "type": "number",
+          "minimum": 0
+        },
+        "burst": {
+          "title": "Rate-limiter burst",
+          "description": "Rate-limiter burst size. 10 when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxConcurrent": {
+          "title": "Max concurrent API calls",
+          "description": "Maximum concurrent in-flight API calls. 5 when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "awsSettings": {
+      "title": "aws driver settings",
+      "description": "Drives compute.machine on AWS EC2. Static credentials are optional: omit accessKeyId/secretAccessKey entirely to use the ambient AWS credential chain (env vars, shared config, IMDS role). SDK retries are capped at one attempt — the engine owns retries (ADR-014).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["region"],
+      "properties": {
+        "region": {
+          "title": "AWS region",
+          "description": "REQUIRED. Region for all EC2 calls (e.g. eu-central-1).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["eu-central-1", "us-east-1"]
+        },
+        "accessKeyId": {
+          "title": "Static access key ID",
+          "description": "Use a secret:// reference — secret://env/NAME or secret://file/PATH. All-or-nothing with secretAccessKey; omit both to use the ambient AWS credential chain. A plain literal is used as the credential as-is (plaintext in the config file — avoid).",
+          "type": "string",
+          "examples": ["secret://env/AWS_ACCESS_KEY_ID"]
+        },
+        "secretAccessKey": {
+          "title": "Static secret access key",
+          "description": "Use a secret:// reference — secret://env/NAME or secret://file/PATH. All-or-nothing with accessKeyId. A plain literal is used as the credential as-is (plaintext in the config file — avoid).",
+          "type": "string",
+          "examples": ["secret://env/AWS_SECRET_ACCESS_KEY"]
+        },
+        "sessionToken": {
+          "title": "Static session token",
+          "description": "Optional session token for temporary credentials; requires the accessKeyId/secretAccessKey pair. Use a secret:// reference.",
+          "type": "string",
+          "examples": ["secret://env/AWS_SESSION_TOKEN"]
+        },
+        "endpoint": {
+          "title": "API endpoint override",
+          "description": "Test override of the EC2 endpoint. Leave unset in production.",
+          "type": "string"
+        },
+        "subnetId": {
+          "title": "Subnet ID",
+          "description": "Subnet to launch instances into (e.g. subnet-0abc...). Unset = the region's default VPC/subnet.",
+          "type": "string"
+        },
+        "securityGroupIds": {
+          "title": "Security group IDs",
+          "description": "Security groups attached to launched instances.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "title": "Security group ID",
+            "description": "One security group ID (sg-...)."
+          }
+        },
+        "keyName": {
+          "title": "EC2 key pair name",
+          "description": "Name of the EC2 key pair installed on launched instances.",
+          "type": "string"
+        },
+        "instanceProfile": {
+          "title": "IAM instance profile name",
+          "description": "IAM instance profile attached to launched instances.",
+          "type": "string"
+        },
+        "rps": {
+          "title": "Requests per second",
+          "description": "Request-rate limit toward the EC2 API. Driver default when zero/unset.",
+          "type": "number",
+          "minimum": 0
+        },
+        "burst": {
+          "title": "Rate-limiter burst",
+          "description": "Rate-limiter burst size. Driver default when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxConcurrent": {
+          "title": "Max concurrent API calls",
+          "description": "Maximum concurrent in-flight API calls. Driver default when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "dependencies": {
+        "accessKeyId": ["secretAccessKey"],
+        "secretAccessKey": ["accessKeyId"],
+        "sessionToken": ["accessKeyId", "secretAccessKey"]
+      }
+    },
+    "gcpSettings": {
+      "title": "gcp driver settings",
+      "description": "Drives compute.machine on Google Compute Engine. Credentials: a secret:// reference to a service-account key JSON, or omit credentialsJson to use Application Default Credentials. Default billing policy: 60s minimum for compute.machine.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "zone"],
+      "properties": {
+        "project": {
+          "title": "GCP project ID",
+          "description": "REQUIRED. Project all instances are created in and discovered from.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["my-project-123456"]
+        },
+        "zone": {
+          "title": "Default zone",
+          "description": "REQUIRED. Default zone for created instances (e.g. europe-west3-a). A class spec's `location` wins over this.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["europe-west3-a", "us-central1-a"]
+        },
+        "credentialsJson": {
+          "title": "Service-account key (secret:// reference)",
+          "description": "secret:// reference to a service-account key JSON — secret://env/NAME or secret://file/PATH. MUST be a secret:// reference (a plain literal is a boot error). Omit to use Application Default Credentials.",
+          "type": "string",
+          "pattern": "^(secret://(env/[A-Za-z_][A-Za-z0-9_]*|file/.+))?$",
+          "examples": ["secret://file/etc/fleetplane/gcp-sa.json"]
+        },
+        "endpoint": {
+          "title": "API endpoint override",
+          "description": "Test override of the Compute Engine endpoint (disables authentication). Leave unset in production.",
+          "type": "string"
+        },
+        "network": {
+          "title": "VPC network",
+          "description": "Network to attach instances to. Unset = the project default network.",
+          "type": "string"
+        },
+        "subnetwork": {
+          "title": "VPC subnetwork",
+          "description": "Subnetwork to attach instances to.",
+          "type": "string"
+        },
+        "rps": {
+          "title": "Requests per second",
+          "description": "Request-rate limit toward the GCE API. Driver default when zero/unset.",
+          "type": "number",
+          "minimum": 0
+        },
+        "burst": {
+          "title": "Rate-limiter burst",
+          "description": "Rate-limiter burst size. Driver default when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxConcurrent": {
+          "title": "Max concurrent API calls",
+          "description": "Maximum concurrent in-flight API calls. Driver default when zero/unset.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "class": {
+      "title": "Class (creation template)",
+      "description": "A reusable creation template (docs 04 §2). `spec` is kind-specific and may carry provider-specific extras; `reclaim.idleAfter` enables poolless idle reclamation; `scheduling.queue` sets the cost/latency tradeoff.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider"],
+      "properties": {
+        "kind": {
+          "title": "Resource kind",
+          "description": "REQUIRED. Which resource kind this class creates.",
+          "type": "string",
+          "enum": ["compute.machine", "storage.volume"]
+        },
+        "provider": {
+          "title": "Provider instance name",
+          "description": "REQUIRED. Name of a configured provider instance (a key under top-level `providers`). Referencing an unknown provider is a boot error.",
+          "type": "string",
+          "minLength": 1
+        },
+        "spec": {
+          "title": "Kind-specific spec",
+          "description": "The creation spec for this class's kind. Provider-specific extra fields are allowed and passed through to the driver.",
+          "type": "object"
+        },
+        "reclaim": {
+          "title": "Idle reclamation",
+          "description": "Poolless idle reclamation (plan R21): resources created from this class are deleted automatically once idle. Absent = never auto-reclaimed.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idleAfter": {
+              "title": "Idle threshold",
+              "description": "A class-created resource that is ready, has no active leases, and is not delete-protected is drained and deleted after being idle this long (a journaled delete, counted against the reconciler's mutation budget).",
+              "examples": ["5m"],
+              "allOf": [{ "$ref": "#/definitions/duration" }]
+            }
+          }
+        },
+        "scheduling": {
+          "title": "Scheduling policy",
+          "description": "The class's cost/latency tradeoff (docs 11 §8).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "queue": {
+              "title": "Queue policy",
+              "description": "maxWait > 0 lets acquisitions of this class wait for existing or in-flight capacity before scaling up (sequential lease packing); 0/absent = provision immediately.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxWait": {
+                  "title": "Queue budget",
+                  "description": "How long acquisitions of this class wait for existing/in-flight capacity before force-scaling. Must be >= 0 and must not exceed acquire.pendingTimeout (boot error). The effective per-acquisition value is clamped to pendingTimeout - 10s at accept time. A per-request maxWait overrides this default.",
+                  "examples": ["10m"],
+                  "allOf": [{ "$ref": "#/definitions/duration" }]
+                }
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "compute.machine" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": { "spec": { "$ref": "#/definitions/computeMachineSpec" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "storage.volume" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": { "spec": { "$ref": "#/definitions/storageVolumeSpec" } }
+          }
+        }
+      ]
+    },
+    "computeMachineSpec": {
+      "title": "compute.machine spec",
+      "description": "Creation spec for a machine. Capacity dimensions for scheduling: cpu, memoryMiB. Provider-specific extra fields are passed through to the driver.",
+      "type": "object",
+      "required": ["serverType", "image"],
+      "properties": {
+        "serverType": {
+          "title": "Server type",
+          "description": "REQUIRED. Provider server type (e.g. cpx31 on Hetzner, s-2vcpu-4gb on DigitalOcean, t3.small on AWS, e2-medium on GCP).",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["cpx31", "s-2vcpu-4gb", "t3.small", "e2-medium"]
+        },
+        "image": {
+          "title": "Image reference",
+          "description": "REQUIRED. Image reference; syntax is per-driver. Hetzner: id:<n> | name:<os> | snapshot:<label-selector>. DigitalOcean: id:<n> | slug:<distro-slug> | snapshot:<name>.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["name:ubuntu-24.04", "snapshot:ci-runner=v12", "slug:ubuntu-24-04-x64"]
+        },
+        "location": {
+          "title": "Placement",
+          "description": "Placement (location/region/zone); overrides the provider's default location/region/zone setting.",
+          "type": "string",
+          "examples": ["fsn1", "fra1"]
+        },
+        "userData": {
+          "title": "Cloud-init user data",
+          "description": "Cloud-init user data passed to the machine at creation.",
+          "type": "string"
+        },
+        "labels": {
+          "title": "Labels",
+          "description": "Labels applied to the provider resource (verbatim on Hetzner; encoded as fp-tags on DigitalOcean, where unknown keys are dropped).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "title": "Label value",
+            "description": "Label value string."
+          }
+        },
+        "readiness": {
+          "$ref": "#/definitions/readinessSpec"
+        }
+      }
+    },
+    "readinessSpec": {
+      "title": "Readiness probe",
+      "description": "Post-create gate executed by the operation engine after the provider reports success: the machine only becomes ready once the probe passes. Declare EXACTLY ONE of `tcp` or `http` — both, or neither, is a validation error. Targets the machine's first usable address (public IPv4, then public IPv6, then private).",
+      "type": "object",
+      "properties": {
+        "tcp": {
+          "title": "TCP probe",
+          "description": "Passes when a TCP connection to the port succeeds. Mutually exclusive with `http`.",
+          "type": "object",
+          "required": ["port"],
+          "properties": {
+            "port": {
+              "title": "Port",
+              "description": "REQUIRED. Port to dial; must be 1-65535.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "timeout": {
+              "title": "Per-attempt dial timeout",
+              "description": "Default 3s.",
+              "examples": ["3s"],
+              "allOf": [{ "$ref": "#/definitions/duration" }]
+            }
+          }
+        },
+        "http": {
+          "title": "HTTP probe",
+          "description": "GET http://<addr>:<port><path>; passes on the expected status. Mutually exclusive with `tcp`.",
+          "type": "object",
+          "required": ["port", "path"],
+          "properties": {
+            "port": {
+              "title": "Port",
+              "description": "REQUIRED. Port for the request; must be 1-65535.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "path": {
+              "title": "Request path",
+              "description": "REQUIRED. Must start with /.",
+              "type": "string",
+              "pattern": "^/",
+              "examples": ["/healthz"]
+            },
+            "expectStatus": {
+              "title": "Expected status code",
+              "description": "Exact status code required; 0 (default) means any 2xx passes.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 599
+            },
+            "timeout": {
+              "title": "Per-attempt request timeout",
+              "description": "Default 3s.",
+              "examples": ["3s"],
+              "allOf": [{ "$ref": "#/definitions/duration" }]
+            }
+          }
+        },
+        "initialDelay": {
+          "title": "Initial delay",
+          "description": "Wait before the first attempt. Default 0s.",
+          "examples": ["10s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "period": {
+          "title": "Attempt interval",
+          "description": "Interval between attempts. Default 5s.",
+          "examples": ["5s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "budget": {
+          "title": "Total budget",
+          "description": "Total time before the probe declares failure. Default 5m.",
+          "examples": ["5m"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "successThreshold": {
+          "title": "Success threshold",
+          "description": "Consecutive passes required. Default 1.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "oneOf": [
+        { "required": ["tcp"], "not": { "required": ["http"] } },
+        { "required": ["http"], "not": { "required": ["tcp"] } }
+      ]
+    },
+    "storageVolumeSpec": {
+      "title": "storage.volume spec",
+      "description": "Creation spec for a volume. Capacity dimension for scheduling: storageGiB. Provider-specific extra fields are passed through to the driver.",
+      "type": "object",
+      "required": ["sizeGiB"],
+      "properties": {
+        "sizeGiB": {
+          "title": "Volume size (GiB)",
+          "description": "REQUIRED. Must be > 0.",
+          "type": "integer",
+          "minimum": 1,
+          "examples": [100]
+        },
+        "zone": {
+          "title": "Placement zone",
+          "description": "Zone the volume is created in.",
+          "type": "string"
+        },
+        "filesystem": {
+          "title": "Filesystem",
+          "description": "Provider-interpreted, opaque to the kernel.",
+          "type": "string",
+          "examples": ["ext4", "xfs"]
+        }
+      }
+    },
+    "engine": {
+      "title": "engine",
+      "description": "Tunes the operation engine — the component that executes every provider mutation exactly once via a persistent journal (ADR-014, ADR-017). Built-in defaults apply when zero/unset.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pollInterval": {
+          "title": "Engine wake-up cadence",
+          "description": "Fallback wake-up interval — in-process kicks are the primary trigger, so there is rarely a reason to change it. 2s when zero/unset.",
+          "examples": ["2s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "verifyWindow": {
+          "title": "Uncertain-create verification window",
+          "description": "How long a create with an unknown outcome (crash mid-call, ambiguous provider answer) is probed before the operation freezes as `uncertain` for manual :resolve (plan R10). 120s when zero/unset.",
+          "examples": ["120s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        }
+      }
+    },
+    "reconcile": {
+      "title": "reconcile",
+      "description": "Tunes the pool reconciler.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interval": {
+          "title": "Reconciler period",
+          "description": "15s when zero/unset.",
+          "examples": ["15s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "maxMutationsPerCycle": {
+          "title": "Mutation budget per cycle",
+          "description": "The one budget knob (plan R22): maximum provider mutations (creates, deletes, reclaims) per reconcile cycle, across pools. Caps blast radius when a pool spec is wrong. 5 when zero/unset.",
+          "type": "integer",
+          "examples": [5]
+        }
+      }
+    },
+    "acquire": {
+      "title": "acquire",
+      "description": "Tunes acquisition handling.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pendingTimeout": {
+          "title": "Pending acquisition timeout",
+          "description": "Acquisitions that were never satisfied (no capacity, provider down) expire after this long instead of pending forever (plan R6). Defaulted at config load to 15m; also caps every class's scheduling.queue.maxWait.",
+          "examples": ["15m"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        }
+      }
+    },
+    "discovery": {
+      "title": "discovery",
+      "description": "Tunes the provider discovery sweep (ADR-017) — the loop that compares what the provider actually has against Fleetplane's records and resolves ghosts and orphans. Only runs against providers whose health is healthy or unknown.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interval": {
+          "title": "Sweep period",
+          "description": "30s when zero/unset.",
+          "examples": ["30s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "orphanGrace": {
+          "title": "Orphan grace",
+          "description": "Grace between confirming a local record's provider resource is gone (by direct read, not just absent from a list) and tombstoning the record as orphaned. 60s when zero/unset.",
+          "examples": ["60s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
+        "ghostPolicy": {
+          "title": "Ghost policy",
+          "description": "What to do with a ghost — a provider resource carrying Fleetplane's labels but matching no live record. `delete` (default): reclaim it via a journaled delete. `surface`: record it, log a warning, and leave deletion to you.",
+          "type": "string",
+          "enum": ["delete", "surface"]
+        },
+        "adoptUnlabeled": {
+          "title": "Unlabeled-resource policy",
+          "description": "What to do with provider resources carrying NO Fleetplane labels. `off` (default): ignore them entirely (the sweep only lists owned resources). `observed`: list everything and record unlabeled resources with ownership `observed` — visible in the inventory, never mutated. Quote the value (\"off\") so YAML does not read it as a boolean.",
+          "type": "string",
+          "enum": ["off", "observed"]
+        }
+      }
+    },
+    "auth": {
+      "title": "auth",
+      "description": "Static API tokens (docs 07 §2, ADR-008). With no tokens configured the API runs OPEN — every request is allowed; local development only, boot logs a loud warning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {
+          "title": "Static token records",
+          "description": "Generate an entry with: fleetplane token new --name <name> --perm <perm> ... (prints the plaintext once plus the ready-to-paste YAML). Clients present tokens as `Authorization: Bearer flp_<id8>.<secret>`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/token"
+          }
+        }
+      }
+    },
+    "token": {
+      "title": "API token record",
+      "description": "One static token: only the SHA-256 of the secret is ever stored (ADR-008).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {
+          "title": "Token ID",
+          "description": "REQUIRED. Lookup prefix (8 hex chars by convention; the <id8> in flp_<id8>.<secret>). Duplicate IDs are a boot error.",
+          "type": "string",
+          "minLength": 1,
+          "examples": ["8f3a1c2d"]
+        },
+        "name": {
+          "title": "Token name",
+          "description": "Human name; shown in audit events and 403 messages.",
+          "type": "string",
+          "examples": ["ci", "ops"]
+        },
+        "sha256": {
+          "title": "Secret hash",
+          "description": "REQUIRED. Hex SHA-256 of the token secret; must be exactly 64 hex characters. The plaintext secret is never stored anywhere.",
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "permissions": {
+          "title": "Permissions",
+          "description": "Permission names from the closed set. An unknown permission name is a boot error. A token holding `admin` passes every permission check.",
+          "type": "array",
+          "items": {
+            "title": "Permission",
+            "description": "resource.read: list/read resources and acquisitions. resource.acquire: acquire and release. resource.create / resource.delete: create, delete, drain. pool.read / pool.write: read and manage pools. class.read / class.write: read and manage classes. provider.read: provider health. provider.admin: resolve uncertain operations (:resolve). operation.read: operations and audit events. admin: everything.",
+            "type": "string",
+            "enum": [
+              "resource.read",
+              "resource.acquire",
+              "resource.create",
+              "resource.delete",
+              "pool.read",
+              "pool.write",
+              "class.read",
+              "class.write",
+              "provider.read",
+              "provider.admin",
+              "operation.read",
+              "admin"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

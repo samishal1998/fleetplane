@@ -1,8 +1,9 @@
 # Providers
 
 A **provider** is Fleetplane's connection to one external infrastructure authority —
-Hetzner Cloud, DigitalOcean, or anything else that can create and destroy resources.
-A **driver** is the code (`hetzner`, `digitalocean`, `fake`); a **provider instance**
+Hetzner Cloud, DigitalOcean, AWS, GCP, or anything else that can create and destroy
+resources. A **driver** is the code (`hetzner`, `digitalocean`, `aws`, `gcp`,
+`fake`); a **provider instance**
 is one configured use of a driver, named by you in the config file. You can run
 several instances of the same driver (say, two Hetzner projects) side by side.
 
@@ -15,13 +16,15 @@ providers:
       location: fsn1
 ```
 
-Three drivers ship in the default binary (see
+Five drivers ship in the default binary (see
 [`cmd/fleetplane/modules.go`](https://github.com/samishal1998/fleetplane/blob/main/cmd/fleetplane/modules.go)):
 
 | Driver | Kinds | Notes |
 |---|---|---|
 | `hetzner` | `compute.machine` | Hetzner Cloud servers via hcloud-go v2 |
 | `digitalocean` | `compute.machine` | DigitalOcean droplets via godo |
+| `aws` | `compute.machine` | Amazon EC2 instances via aws-sdk-go-v2 |
+| `gcp` | `compute.machine` | Google Compute Engine instances via compute/v1 |
 | `fake` | `compute.machine`, `storage.volume` | Deterministic in-memory provider for tests |
 
 Check instance health with `fleetplane providers` or the Providers view of the
@@ -293,6 +296,238 @@ label-selector discovery; only the mechanics differ.
 | `off` | `stopped` |
 | `archive` | `gone` |
 | anything else | `unknown` |
+
+## AWS
+
+### Settings
+
+```yaml
+providers:
+  aws-main:
+    driver: aws
+    settings:
+      region: eu-central-1                              # required
+      accessKeyId: secret://env/AWS_ACCESS_KEY_ID       # optional pair; omit both
+      secretAccessKey: secret://env/AWS_SECRET_ACCESS_KEY   # for the ambient chain
+```
+
+| Key | Required | Default | Meaning |
+|---|---|---|---|
+| `region` | yes | — | AWS region (e.g. `eu-central-1`) |
+| `accessKeyId` | no | ambient chain | Access key ID as a `secret://` reference; all-or-nothing with `secretAccessKey` |
+| `secretAccessKey` | no | ambient chain | Secret access key as a `secret://` reference |
+| `sessionToken` | no | none | Session token for temporary credentials; requires the static pair |
+| `endpoint` | no | public AWS API | API base URL override (used by tests) |
+| `subnetId` | no | account default | Subnet for created instances |
+| `securityGroupIds` | no | account default | Security group IDs for created instances |
+| `keyName` | no | none | EC2 key pair name for created instances |
+| `instanceProfile` | no | none | IAM instance profile **name** attached to created instances (needs `iam:PassRole`) |
+| `rps` | no | `5` | Sustained request rate toward the EC2 API |
+| `burst` | no | `10` | Token-bucket burst size |
+| `maxConcurrent` | no | `5` | Max in-flight API calls |
+
+Setting only one of `accessKeyId`/`secretAccessKey` is a boot error
+(`aws: accessKeyId and secretAccessKey are all-or-nothing`), as is a
+`sessionToken` without the pair. When the pair is **omitted entirely**, the
+driver uses the SDK's ambient credential chain — environment variables, shared
+config/credentials files, IMDS/IRSA instance roles — so a Fleetplane host
+running on AWS needs no keys in its config at all. The minimal IAM policy for
+either route is in the
+[setup guide → provider credentials and permissions](../../SETUP_GUIDE.md#12-provider-credentials-and-permissions).
+SDK retries are capped at one attempt — the operation engine is the only retry
+authority ([ADR-014](../adr/ADR-014-retries.md)) — and the shared pacer shapes
+request rate (`rps`/`burst`/`maxConcurrent`).
+
+### Instance types and images
+
+```yaml
+classes:
+  ci-aws:
+    kind: compute.machine
+    provider: aws-main
+    spec:
+      serverType: t3.medium
+      image: "snapshot:ci-runner=v12"
+      location: eu-central-1a        # availability zone (optional)
+```
+
+`serverType` is an EC2 instance type name, passed through as-is. Reported
+capacity comes from `DescribeInstanceTypes` (cached per type): `cpu` = default
+vCPUs, `memoryMiB` = memory in MiB. `spec.location`, when set, is the
+availability zone.
+
+`image` takes one of three forms:
+
+| Form | Example | Resolution |
+|---|---|---|
+| `id:<ami>` | `id:ami-0abc1234567890def` | Exact AMI ID |
+| `name:<pattern>` | `name:ubuntu/images/hvm-ssd-gp3/*24.04*` | Available self- and Amazon-owned AMIs by name pattern; **newest wins** |
+| `snapshot:<k=v>` | `snapshot:ci-runner=v12` | Available self-owned AMIs by tag equality; **newest wins** |
+
+`snapshot:` is the image-pipeline form: tag the AMIs you build
+(`ci-runner=v12`) and select by tag; the most recently created match is used.
+A selector that matches nothing is a configuration error: the create fails
+fast with an `invalid` error (`no image matches ...`) instead of retrying.
+
+### Billing
+
+The driver declares EC2's per-second billing with a **60-second minimum** for
+`compute.machine` — a minimum duration, no increment
+([cost-aware leasing](concepts.md#cost-aware-leasing-billing-windows)). With
+no increment there are no billing-boundary windows to schedule deletes
+around; the minimum only means a machine deleted within its first minute was
+billed for the full minute. Override or disable per kind via
+`providers.<name>.billing`
+([configuration → billing](configuration.md#billing-providersnamebilling)).
+
+### Identity labels
+
+AWS tag keys permit dots and slashes, so the `fleetplane.io/*` identity
+labels ride as **native EC2 instance tags, verbatim — no codec**
+([ADR-013](../adr/ADR-013-registration-labels.md)). Extra labels from
+`spec.labels` are merged in (plus a `Name` tag from the desired name); on a
+key collision the reserved labels win. Discovery filters server-side on the
+ownership tags; create-dedup finds the op tag, and the op ID additionally
+rides as EC2's native `ClientToken` idempotency token. Don't remove
+`fleetplane.io/*` tags — ownership tracking, discovery, and crash recovery
+depend on them.
+
+### Instance state mapping
+
+| EC2 state | Fleetplane observed phase |
+|---|---|
+| `pending` | `pending` |
+| `running` | `running` |
+| `stopping`, `stopped` | `stopped` |
+| `shutting-down` | `deleting` |
+| `terminated` | `gone` |
+| anything else | `unknown` |
+
+Terminated instances stay visible on EC2 for up to an hour; `Discover` skips
+them (they are artifacts, not resources) while `Get` reports them as `gone`.
+The full native instance object is preserved in `status.extensions`.
+
+## GCP
+
+### Settings
+
+```yaml
+providers:
+  gcp-main:
+    driver: gcp
+    settings:
+      project: my-project                                  # required
+      zone: europe-west3-a                                 # required default zone
+      credentialsJson: secret://file/etc/fleetplane/gcp-sa.json   # omit for ADC
+```
+
+| Key | Required | Default | Meaning |
+|---|---|---|---|
+| `project` | yes | — | GCP project ID |
+| `zone` | yes | — | Default zone for instances; `spec.location` wins |
+| `credentialsJson` | no | ADC | Service-account JSON key as a `secret://` reference; omitted = Application Default Credentials |
+| `endpoint` | no | public GCE API | API base URL override (used by tests; disables authentication) |
+| `network` | no | `global/networks/default` | Network for created instances |
+| `subnetwork` | no | none | Subnetwork for created instances |
+| `rps` | no | `5` | Sustained request rate toward the GCE API |
+| `burst` | no | `10` | Token-bucket burst size |
+| `maxConcurrent` | no | `5` | Max in-flight API calls |
+
+Unlike the token drivers, `credentialsJson` **must** be a `secret://`
+reference when set — a literal value is a boot error
+(`gcp: credentialsJson must be a secret:// reference`). `secret://file/...`
+is the natural fit for a JSON key. Omitting it entirely selects the ambient
+Application Default Credentials chain (`GOOGLE_APPLICATION_CREDENTIALS`,
+gcloud user credentials, metadata server), so a Fleetplane host running on
+GCP needs no key in its config at all. Service-account permissions — the
+simple `roles/compute.instanceAdmin.v1` path and the least-privilege list —
+are in the
+[setup guide → provider credentials and permissions](../../SETUP_GUIDE.md#12-provider-credentials-and-permissions).
+The REST client performs no automatic retries (the operation engine owns
+them, [ADR-014](../adr/ADR-014-retries.md)), and the shared pacer shapes
+request rate.
+
+### Machine types and images
+
+```yaml
+classes:
+  ci-gcp:
+    kind: compute.machine
+    provider: gcp-main
+    spec:
+      serverType: e2-medium
+      image: "family:debian-cloud/debian-12"
+      location: europe-west3-b       # zone (optional; default is settings.zone)
+```
+
+`serverType` is a GCE machine type name. Reported capacity comes from
+`machineTypes.get` (cached per zone/type): `cpu` = guest CPUs, `memoryMiB` =
+memory in MiB. The instance zone is `spec.location` when set, otherwise
+`settings.zone`; discovery is **project-wide** (aggregated across all zones),
+so instances outside the default zone are still swept.
+
+`image` takes one of four forms:
+
+| Form | Example | Resolution |
+|---|---|---|
+| `id:<image>` | `id:my-image` | Image in your project by name; a self-link or partial URL passes through |
+| `family:<[project/]family>` | `family:debian-cloud/debian-12` | **Latest image in the family**; bare family name = your project |
+| `name:<[project/]name>` | `name:debian-cloud/debian-12-bookworm-v20240101` | Exact image by name |
+| `snapshot:<k=v>` | `snapshot:ci-runner=v12` | Labeled image in your project; **newest wins** |
+
+`snapshot:` is the image-pipeline form: label the images you build and select
+by label; the most recently created match is used. A selector that matches
+nothing is a configuration error: the create fails fast with an `invalid`
+error (`no image matches ...`) instead of retrying.
+
+### Billing
+
+The driver declares GCE's per-second billing with a **60-second minimum** for
+`compute.machine` — a minimum duration, no increment, exactly like the AWS
+driver. No billing-boundary window scheduling results; override or disable
+per kind via `providers.<name>.billing`
+([configuration → billing](configuration.md#billing-providersnamebilling)).
+
+### Identity labels become `fp-*` labels
+
+GCE labels are strictly lowercase `[a-z0-9_-]` (keys must start with a
+letter, 63 chars max) — dots, slashes, and uppercase are all illegal, which
+rules out `fleetplane.io/*` keys and uppercase ULID values. The driver
+therefore encodes the reserved identity labels through a codec
+([`providers/gcp/labels.go`](https://github.com/samishal1998/fleetplane/blob/main/providers/gcp/labels.go)) —
+the GCP twin of DigitalOcean's tag codec. On an instance you will see:
+
+| Label | GCE label on the instance |
+|---|---|
+| `fleetplane.io/managed=true` | `fp-managed=true` |
+| `fleetplane.io/owner=<own_...>` | `fp-owner=<own_...>` (lowercased) |
+| `fleetplane.io/id=<res_...>` | `fp-id=<res_...>` (lowercased) |
+| `fleetplane.io/op=<op_...>` | `fp-op=<op_...>` (lowercased) |
+| `fleetplane.io/class=<name>` | `fp-class=<name>` |
+| `fleetplane.io/test`, `fleetplane.io/test-run` | `fp-test=<v>`, `fp-test-run=<v>` |
+
+Values are lowercased on encode (GCE requires it); on decode the
+ULID-carrying values (`fp-owner`, `fp-id`, `fp-op`, `fp-test-run`) regain
+their canonical uppercase payload, so the SDK's label contract round-trips
+unchanged. Unlike DigitalOcean, custom label keys from `spec.labels` are
+**not dropped** — they are sanitized to the GCE charset (lowercased, illegal
+runes become `-`, prefixed `u-` when not starting with a letter, truncated to
+63 chars) and pass through decode verbatim. Discovery pushes the label
+equalities down as a server-side filter and re-verifies them client-side
+against the decoded labels.
+
+### Instance status mapping
+
+| GCE status | Fleetplane observed phase |
+|---|---|
+| `PENDING`, `PROVISIONING`, `STAGING` | `pending` |
+| `RUNNING` | `running` |
+| `PENDING_STOP`, `STOPPING`, `SUSPENDING`, `SUSPENDED`, `STOPPED`, `TERMINATED`, `DEPROVISIONING` | `stopped` |
+| anything else (e.g. `REPAIRING`) | `unknown` |
+
+Note GCE's `TERMINATED` means **stopped** — the instance still exists; a
+deleted instance 404s instead (reported as the typed `not_found`). The full
+native instance object is preserved in `status.extensions`.
 
 ## Writing a provider
 

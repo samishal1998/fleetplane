@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/samishal1998/fleetplane/main/schema/config.schema.json
 # Fleetplane configuration (unknown fields are rejected at boot — ADR-007).
 server:
   addr: ":8080"

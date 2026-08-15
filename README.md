@@ -16,12 +16,13 @@ Everything mutating flows through a crash-safe **operation journal**: kill the p
 - **Acquisitions and leases** — `fleetplane acquire` binds you to an existing machine when capacity is free, or creates one when it is not; leases carry TTLs and idle machines are reclaimed by policy.
 - **Cost-aware leasing** — providers declare billing windows (e.g. per-started-hour); Fleetplane reuses already-paid capacity, queues acquisitions to pack work into paid windows, and times deletions to land before billing boundaries ([design doc 11](docs/11_COST_AWARE_LEASING.md)).
 - **Crash-safe operations** — every provider call is journaled first; the operation engine is the only retry authority, and ambiguous outcomes are verified rather than guessed ([ADR-014](docs/adr/ADR-014-retries.md), [ADR-017](docs/adr/ADR-017-operation-states.md)).
-- **Multi-provider** — the same kernel drives Hetzner Cloud, DigitalOcean, and a deterministic fake provider; orchestration code never imports a provider SDK (enforced mechanically).
+- **Multi-provider** — the same kernel drives Hetzner Cloud, DigitalOcean, AWS, and GCP (plus a deterministic fake provider); orchestration code never imports a cloud SDK (enforced mechanically).
+- **Dynamic classes** — machine templates managed via API/CLI/dashboard or config, validated against the kind registry at definition time.
 
 ## Key features
 
 - Single static Go binary: server, CLI, and web dashboard in one `fleetplane` executable
-- Providers: **Hetzner Cloud**, **DigitalOcean**, and a **fake** provider for local development and tests
+- Providers: **Hetzner Cloud**, **DigitalOcean**, **AWS**, **GCP**, and a **fake** provider for local development and tests
 - Generic resource kinds: `compute.machine` and `storage.volume` (the kind registry is open to more)
 - Declarative apply: `fleetplane apply -f` with multi-doc YAML `Pool` and `Resource` manifests, compiled onto the same imperative API
 - Web dashboard embedded in the binary, served at `/ui/` — no extra deployment, works offline
@@ -134,7 +135,7 @@ To go from here to a real cloud, follow the **[setup guide](SETUP_GUIDE.md)**.
                                      └──────┬───────────┬───────────┘
                                      provider SDK   provider SDK
                                           │               │
-                                     Hetzner API    DigitalOcean API
+                                  Hetzner / DO      AWS / GCP APIs
 ```
 
 The kernel (API, scheduler, reconciler, operation engine, storage) is provider-agnostic: it journals intent, dispatches through a narrow provider SDK, and verifies outcomes. Providers are thin adapters; the boundary is enforced by `scripts/check-boundaries.sh` and depguard, so orchestration code can never import a cloud SDK. Depth lives in the design docs: [architecture](docs/02_ARCHITECTURE.md), [provider SDK](docs/03_PROVIDER_SDK.md), [API and resource model](docs/04_API_AND_RESOURCE_MODEL.md), [reconciliation and scheduling](docs/05_RECONCILIATION_AND_SCHEDULING.md).
@@ -148,7 +149,7 @@ The kernel (API, scheduler, reconciler, operation engine, storage) is provider-a
 | [Configuration](docs/guides/configuration.md) | Every config key, defaults, and validation rules |
 | [CLI](docs/guides/cli.md) | The full `fleetplane` command tree and exit codes |
 | [API](docs/guides/api.md) | HTTP routes, auth, idempotency, error shape |
-| [Providers](docs/guides/providers.md) | Hetzner, DigitalOcean, and fake driver settings |
+| [Providers](docs/guides/providers.md) | Hetzner, DigitalOcean, AWS, GCP, and fake driver settings |
 | [Operations](docs/guides/operations.md) | Running in production: metrics, backup, uncertain operations |
 | [Dashboard](docs/guides/dashboard.md) | The embedded web UI |
 

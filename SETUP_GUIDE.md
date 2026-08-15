@@ -1,6 +1,6 @@
 # Fleetplane Setup Guide
 
-This guide takes you from nothing to a production Fleetplane deployment: install the binary, write a configuration file, secure the API with tokens, run under systemd, verify health, and connect a real cloud provider (Hetzner Cloud or DigitalOcean).
+This guide takes you from nothing to a production Fleetplane deployment: install the binary, write a configuration file, secure the API with tokens, run under systemd, verify health, and connect a real cloud provider (Hetzner Cloud, DigitalOcean, AWS, or GCP).
 
 Related reading: [configuration reference](docs/guides/configuration.md), [CLI reference](docs/guides/cli.md), [operations guide](docs/guides/operations.md), [providers guide](docs/guides/providers.md).
 
@@ -90,7 +90,7 @@ providers:
       location: fsn1
 ```
 
-Available drivers: `hetzner`, `digitalocean`, and `fake` (deterministic in-memory provider, ideal for trying Fleetplane without a cloud account). See sections 8 and 9 for full provider walkthroughs.
+Available drivers: `hetzner`, `digitalocean`, `aws`, `gcp`, and `fake` (deterministic in-memory provider, ideal for trying Fleetplane without a cloud account). See sections 8–11 for full provider walkthroughs and section 12 for the credentials and permissions each provider needs.
 
 ### 2.4 Classes
 
@@ -160,7 +160,7 @@ export FLEETPLANE_TOKEN=flp_8f3a1c2d.<base64-secret>
 fleetplane resources
 ```
 
-The closed permission set: `resource.read`, `resource.acquire`, `resource.create`, `resource.delete`, `pool.read`, `pool.write`, `provider.read`, `provider.admin`, `operation.read`, and `admin` (grants everything). Unknown permission names are boot errors. Details in [ADR-008](docs/adr/ADR-008-tokens.md).
+The closed permission set: `resource.read`, `resource.acquire`, `resource.create`, `resource.delete`, `pool.read`, `pool.write`, `class.read`, `class.write`, `provider.read`, `provider.admin`, `operation.read`, and `admin` (grants everything). Unknown permission names are boot errors. Details in [ADR-008](docs/adr/ADR-008-tokens.md).
 
 ## 4. Run under systemd
 
@@ -367,7 +367,225 @@ Fleetplane marks everything it creates with `fleetplane.io/*` labels (`managed`,
 
 5. **Tag-based identity note.** DigitalOcean has flat tags instead of key=value labels, so Fleetplane encodes its reserved identity labels as tags of the form `fp-<short>:<value>` (e.g. `fp-id:...`, `fp-owner:...`, `fp-op:...`) on every droplet it manages. Do not remove these tags — ownership tracking, discovery, and crash recovery depend on them. Custom label keys outside the reserved set are dropped on DigitalOcean, and tag values are sanitized to the charset `[A-Za-z0-9:\-_]`.
 
-## 10. Backup and restore
+## 10. AWS walkthrough
+
+1. **Create IAM credentials.** Create a dedicated IAM user (or role) with the minimal EC2 policy from [section 12](#12-provider-credentials-and-permissions), then create an access key for it. Alternatively, skip static keys entirely: when Fleetplane itself runs on AWS, attach the policy to the instance's role and omit `accessKeyId`/`secretAccessKey` — the driver falls back to the SDK's ambient credential chain (environment, shared config/credentials files, IMDS/IRSA roles), and no keys go in the config at all.
+
+2. **Export the key pair** where the server runs (or put it in the systemd `EnvironmentFile`):
+
+   ```bash
+   export AWS_ACCESS_KEY_ID=<access key id>
+   export AWS_SECRET_ACCESS_KEY=<secret access key>
+   ```
+
+3. **Configure:**
+
+   ```yaml
+   providers:
+     aws-main:
+       driver: aws
+       settings:
+         region: eu-central-1                              # required
+         accessKeyId: secret://env/AWS_ACCESS_KEY_ID       # omit BOTH keys for the ambient chain
+         secretAccessKey: secret://env/AWS_SECRET_ACCESS_KEY
+         # sessionToken: secret://env/AWS_SESSION_TOKEN    # only with temporary credentials
+         # subnetId: subnet-0abc123                        # optional placement
+         # securityGroupIds: [sg-0abc123]                  # optional
+         # keyName: my-keypair                             # optional EC2 key pair
+         # instanceProfile: my-profile                     # optional; needs iam:PassRole (section 12)
+
+   classes:
+     ci-aws:
+       kind: compute.machine
+       provider: aws-main
+       spec:
+         serverType: t3.medium
+         image: "id:ami-0abc1234567890def"
+   ```
+
+   `accessKeyId` and `secretAccessKey` are all-or-nothing — setting only one is a boot error, as is a `sessionToken` without the pair. `spec.location` is an availability zone (e.g. `eu-central-1a`). Optional pacing settings mirror the other drivers: `endpoint`, `rps`, `burst`, `maxConcurrent`.
+
+4. **Image selector syntax:**
+
+   | Form | Example | Selects |
+   |---|---|---|
+   | `id:<ami>` | `id:ami-0abc1234567890def` | An AMI by ID |
+   | `name:<pattern>` | `name:ubuntu/images/hvm-ssd-gp3/*24.04*` | Newest available self- or Amazon-owned AMI matching the name pattern |
+   | `snapshot:<k=v>` | `snapshot:ci-runner=v12` | Newest available self-owned AMI with that tag |
+
+   `snapshot:` selects your own AMIs by tag equality — tag the AMIs your image pipeline produces (e.g. `ci-runner=v12`) and select by tag. When several match, the newest wins. A selector matching nothing is a fail-fast config error, not a retry.
+
+5. **Try it:**
+
+   ```bash
+   fleetplane acquire --class ci-aws --cpu 2 --ttl 90m
+   fleetplane watch acq_01J...
+   fleetplane resources
+   ```
+
+AWS tag keys permit dots and slashes, so the `fleetplane.io/*` identity labels land on instances as native EC2 tags, verbatim. Leave them in place — discovery and crash recovery depend on them.
+
+## 11. GCP walkthrough
+
+1. **Create a service account and key.** Create a dedicated service account with the permissions from [section 12](#12-provider-credentials-and-permissions) (simple path: `roles/compute.instanceAdmin.v1` on the project), then create a JSON key for it and place it on the server:
+
+   ```bash
+   sudo install -m 0600 -o fleetplane sa-key.json /etc/fleetplane/gcp-sa.json
+   ```
+
+2. **Configure:**
+
+   ```yaml
+   providers:
+     gcp-main:
+       driver: gcp
+       settings:
+         project: my-project                                  # required
+         zone: europe-west3-a                                 # required default zone; spec.location wins
+         credentialsJson: secret://file/etc/fleetplane/gcp-sa.json
+         # network: global/networks/default                   # optional; this is the default
+         # subnetwork: regions/europe-west3/subnetworks/main  # optional
+
+   classes:
+     ci-gcp:
+       kind: compute.machine
+       provider: gcp-main
+       spec:
+         serverType: e2-medium
+         image: "family:debian-cloud/debian-12"
+   ```
+
+   `credentialsJson` **must** be a `secret://` reference when set (a literal value is a boot error); `secret://file/...` is the natural fit for a JSON key. Omit it entirely to use Application Default Credentials instead (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud user credentials, or the metadata server when Fleetplane runs on GCP) — no key in the config at all. `spec.location` is a zone. Optional pacing settings mirror the other drivers: `endpoint`, `rps`, `burst`, `maxConcurrent`.
+
+3. **Image selector syntax:**
+
+   | Form | Example | Selects |
+   |---|---|---|
+   | `id:<image>` | `id:my-image` | An image in your project by name; a self-link or partial URL passes through |
+   | `family:<[project/]family>` | `family:debian-cloud/debian-12` | The latest image in a family (bare family name = your project) |
+   | `name:<[project/]name>` | `name:debian-cloud/debian-12-bookworm-v20240101` | An exact image by name |
+   | `snapshot:<k=v>` | `snapshot:ci-runner=v12` | Newest image in your project with that label |
+
+   `snapshot:` selects images in your project by label — label the images your pipeline produces and select by label; the newest match wins. A selector matching nothing is a fail-fast config error, not a retry.
+
+4. **Label-based identity note.** GCE labels only allow lowercase `[a-z0-9_-]` keys and values, so Fleetplane encodes its reserved identity labels as `fp-<short>` labels (e.g. `fp-id`, `fp-owner`, `fp-op`) on every instance it manages, with values lowercased on the way in and ULID values restored on the way out. Do not remove these labels — ownership tracking, discovery, and crash recovery depend on them. Custom label keys from `spec.labels` are sanitized to the GCE charset (lowercased; illegal runes become `-`).
+
+5. **Try it:**
+
+   ```bash
+   fleetplane acquire --class ci-gcp --cpu 2 --ttl 90m
+   fleetplane watch acq_01J...
+   fleetplane resources
+   ```
+
+## 12. Provider credentials and permissions
+
+What credential each driver needs, and the minimal permissions to grant it. Console navigation reflects the providers' current UIs and may drift — the permission lists are the stable part.
+
+### Hetzner Cloud
+
+Create a **project-scoped API token** with **Read & Write** permission: in the Hetzner Cloud console, select (ideally) a dedicated project, then Security → API tokens → Generate API token. Hetzner tokens have no finer-grained scoping than read vs. read/write; write is required because Fleetplane creates and deletes servers. Using a dedicated project is the blast-radius limit: the token can only touch that project's resources.
+
+```yaml
+settings:
+  token: secret://env/HETZNER_TOKEN
+```
+
+### DigitalOcean
+
+Create a **personal access token** with read **and write** scopes (API → Tokens → Generate New Token). If you use custom scopes, the driver needs droplet create/read/delete plus tag access — it creates and deletes droplets and stamps identity tags on them. Prefer a dedicated team/project to bound what the token can see.
+
+```yaml
+settings:
+  token: secret://env/DIGITALOCEAN_TOKEN
+```
+
+### AWS
+
+Create an **IAM user or role** with this minimal policy — everything the driver calls, nothing more:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FleetplaneEC2",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:DescribeInstances",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeRegions",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+`ec2:DescribeRegions` backs the provider health check; `ec2:CreateTags` is required because every create tags the instance with the `fleetplane.io/*` identity labels. If you want to tighten `ec2:CreateTags` so the credential can only tag at instance creation (never re-tag existing resources), split it into its own statement with the condition `"StringEquals": {"ec2:CreateAction": "RunInstances"}` — kept simple by default above.
+
+Add `iam:PassRole` **only** when `settings.instanceProfile` is configured — launching an instance with an instance profile passes its role:
+
+```json
+{
+  "Sid": "FleetplanePassRole",
+  "Effect": "Allow",
+  "Action": "iam:PassRole",
+  "Resource": "arn:aws:iam::<account-id>:role/<instance-profile-role>"
+}
+```
+
+Wire the key pair through `secret://env`:
+
+```yaml
+settings:
+  region: eu-central-1
+  accessKeyId: secret://env/AWS_ACCESS_KEY_ID
+  secretAccessKey: secret://env/AWS_SECRET_ACCESS_KEY
+```
+
+**No-keys alternative:** when Fleetplane itself runs on AWS, attach the policy to the instance's IAM role and omit `accessKeyId`/`secretAccessKey` entirely — the driver uses the SDK's ambient credential chain (environment variables, shared config/credentials files, IMDS/IRSA roles) and no secret ever appears in the config.
+
+### GCP
+
+Create a **service account** for Fleetplane. The simple path: grant it `roles/compute.instanceAdmin.v1` on the project. Add `roles/iam.serviceAccountUser` **only** if you extend created instances to run as a service account — the driver does not attach one today, so it is normally unnecessary.
+
+For a least-privilege custom role instead, these are the permissions behind the API calls the driver makes:
+
+| Permission | Used for |
+|---|---|
+| `compute.instances.create` | Instance creation |
+| `compute.instances.delete` | Instance deletion |
+| `compute.instances.get` | Get by reference |
+| `compute.instances.list` | Discovery (project-wide aggregated list) |
+| `compute.instances.setLabels` | Identity labels on created instances |
+| `compute.instances.setMetadata` | `spec.userData` (cloud-init via the `user-data` metadata key) |
+| `compute.zoneOperations.get` | Polling create/delete operations |
+| `compute.zones.get` | Provider health check |
+| `compute.machineTypes.get` | Capacity (cpu/memory) reporting |
+| `compute.images.get`, `compute.images.getFromFamily`, `compute.images.list`, `compute.images.useReadOnly` | Image selector resolution and boot-disk sourcing |
+| `compute.disks.create` | The boot disk |
+| `compute.subnetworks.use` | When `settings.subnetwork` is set |
+| `compute.subnetworks.useExternalIp` (or `compute.networks.useExternalIp` on legacy networks) | The ephemeral external IP every instance gets |
+
+GCP's mapping of permissions to API calls is theirs and can evolve; if a custom role fails with a 403 naming a permission, add it — or fall back to `roles/compute.instanceAdmin.v1`.
+
+Create a JSON key for the service account and reference it via `secret://file`:
+
+```yaml
+settings:
+  project: my-project
+  zone: europe-west3-a
+  credentialsJson: secret://file/etc/fleetplane/gcp-sa.json
+```
+
+**No-key alternative:** omit `credentialsJson` entirely to use Application Default Credentials — `GOOGLE_APPLICATION_CREDENTIALS`, gcloud user credentials, or the metadata server when Fleetplane runs on GCP with the service account attached to its own VM.
+
+## 13. Backup and restore
 
 Hot backup runs online via the ops listener (`VACUUM INTO` on a dedicated connection — safe under WAL, and kernel writes never queue behind it):
 
@@ -377,7 +595,7 @@ fleetplane admin backup --to /var/backups/fleetplane/fleetplane-$(date +%F).db
 
 The `--to` path is on the **server** host (the CLI just POSTs `{"to":PATH}` to `<ops-addr>/admin/backup`); `--ops-addr` defaults to `$FLEETPLANE_OPS_ADDR`, else `http://127.0.0.1:9090`. Full procedure, including restore: [backup and restore runbook](docs/runbooks/backup-restore.md).
 
-## 11. Troubleshooting
+## 14. Troubleshooting
 
 Boot fails fast on configuration problems. Common errors:
 
@@ -386,7 +604,7 @@ Boot fails fast on configuration problems. Common errors:
 | `config: ... unknown field` | A key the binary does not implement (often a typo) — decoding is strict | Fix the key name; compare with [`examples/config.yaml`](examples/config.yaml) |
 | `config: storage.path is required` | Missing `storage.path` | Set the SQLite file path |
 | `config: invalid duration "..."` | Duration not a Go duration string | Use forms like `20s`, `5m`, `1h30m` |
-| `config: providers.<name>.driver is required` | Provider block without `driver` | Set `driver: hetzner`, `digitalocean`, or `fake` |
+| `config: providers.<name>.driver is required` | Provider block without `driver` | Set `driver: hetzner`, `digitalocean`, `aws`, `gcp`, or `fake` |
 | `config: classes.<name> needs kind and provider` | Incomplete class | Add `kind` and `provider` |
 | `config: classes.<name> references unknown provider "..."` | Class points at an unconfigured provider | Match the class `provider` to a `providers` entry |
 | `config: auth.tokens[N] needs id and sha256` | Incomplete token entry | Paste the full snippet from `fleetplane token new` |
@@ -394,6 +612,9 @@ Boot fails fast on configuration problems. Common errors:
 | `config: auth.tokens: duplicate id "..."` | Two tokens share an `id` | Generate a fresh token |
 | `auth.tokens[N]: unknown permission "..."` | Permission name outside the closed set | Use the names listed in section 3 |
 | `hetzner: token is required (secret:// reference)` (same for `digitalocean:`) | Missing/empty provider token setting | Set `settings.token` to a `secret://` reference |
+| `aws: region is required` / `gcp: project is required` / `gcp: zone is required` | Missing required driver setting | Set `settings.region` (aws) or `settings.project` + `settings.zone` (gcp) |
+| `aws: accessKeyId and secretAccessKey are all-or-nothing` | Only one of the static key pair set | Set both, or omit both to use the ambient credential chain |
+| `gcp: credentialsJson must be a secret:// reference (07 §4)` | Literal value in `credentialsJson` | Use `secret://file/...` (or omit it to use Application Default Credentials) |
 | `environment variable "NAME" is not set` | `secret://env/NAME` points at an unset variable | Export it in the service environment (systemd `EnvironmentFile`) |
 | `listen <addr>: ... address already in use` | Another process holds `server.addr` or `server.opsAddr` | Free the port or change the address |
 | `NO API TOKENS CONFIGURED` warning in logs | `auth.tokens` is empty — the API is open | Add tokens (section 3) before exposing the listener |

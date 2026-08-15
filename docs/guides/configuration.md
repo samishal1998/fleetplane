@@ -6,6 +6,39 @@ Fleetplane reads a single YAML file, passed to the server at startup:
 fleetplane serve --config /etc/fleetplane/config.yaml
 ```
 
+## Editor autocomplete (JSON Schema)
+
+A JSON Schema for this file ships at
+[`schema/config.schema.json`](../../schema/config.schema.json), published at:
+
+```
+https://raw.githubusercontent.com/samishal1998/fleetplane/main/schema/config.schema.json
+```
+
+With it, your editor autocompletes every key, shows these docs on hover, and
+flags unknown keys / bad durations before `fleetplane serve` does.
+
+**VS Code** (with the [Red Hat YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml),
+which bundles `yaml-language-server`): add this modeline as the first line of
+your config file —
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/samishal1998/fleetplane/main/schema/config.schema.json
+```
+
+Alternatively, map it once in `settings.json` instead of per file:
+
+```json
+"yaml.schemas": {
+  "https://raw.githubusercontent.com/samishal1998/fleetplane/main/schema/config.schema.json": ["**/fleetplane*.yaml", "**/config.yaml"]
+}
+```
+
+**JetBrains IDEs** (GoLand, IntelliJ): Settings → Languages & Frameworks →
+Schemas and DTDs → **JSON Schema Mappings** → add a mapping with the URL
+above (Schema version: JSON Schema version 7) and point it at your config
+file or a `config.yaml` file-name pattern.
+
 Every key the binary understands is documented on this page, section by
 section, with its type, default, and behavior. A complete annotated example
 is at the [end of the page](#complete-annotated-example).
@@ -32,7 +65,7 @@ defaulted at config load — see [acquire](#acquire).)
 ```yaml
 server:    {}   # listen addresses, shutdown
 storage:   {}   # SQLite database path (required)
-providers: {}   # provider instances (hetzner, digitalocean, fake)
+providers: {}   # provider instances (hetzner, digitalocean, aws, gcp, fake)
 classes:   {}   # reusable creation templates
 engine:    {}   # operation engine tuning
 reconcile: {}   # pool reconciler tuning
@@ -84,7 +117,7 @@ are fine.
 
 | Key | Type | Default | Behavior |
 |---|---|---|---|
-| `providers.<name>.driver` | string | **required** | One of `hetzner`, `digitalocean`, `fake`. A provider without a driver is a boot error. |
+| `providers.<name>.driver` | string | **required** | One of `hetzner`, `digitalocean`, `aws`, `gcp`, `fake`. A provider without a driver is a boot error. |
 | `providers.<name>.settings` | map | — | Raw driver config block, decoded by the driver itself (tables below). |
 | `providers.<name>.billing` | map | — | Per-kind billing-policy overrides for cost-aware leasing ([below](#billing-providersnamebilling)). |
 
@@ -184,6 +217,97 @@ providers:
       region: fra1
 ```
 
+### Driver: `aws`
+
+Drives `compute.machine` on Amazon EC2 via aws-sdk-go-v2. SDK retries are
+capped at one attempt — the operation engine is the only retry authority
+([ADR-014](../adr/ADR-014-retries.md)).
+
+| Setting | Type | Default | Behavior |
+|---|---|---|---|
+| `region` | string | **required** | AWS region (e.g. `eu-central-1`). Missing region is a boot error. |
+| `accessKeyId` | string | — | Access key ID; use a `secret://` reference. All-or-nothing with `secretAccessKey` — setting only one is a boot error. Omit **both** to use the SDK's ambient credential chain (environment, shared config/credentials files, IMDS/IRSA roles). |
+| `secretAccessKey` | string | — | Secret access key; use a `secret://` reference. |
+| `sessionToken` | string | — | Session token for temporary credentials; requires the static pair. |
+| `endpoint` | string | — | API endpoint override (test use). |
+| `subnetId` | string | — | Subnet for created instances. |
+| `securityGroupIds` | list | — | Security group IDs for created instances. |
+| `keyName` | string | — | EC2 key pair name for created instances. |
+| `instanceProfile` | string | — | IAM instance profile **name** attached to created instances; the credential then also needs `iam:PassRole` (see the [setup guide](../../SETUP_GUIDE.md#12-provider-credentials-and-permissions)). |
+| `rps` | float | `5` when zero | Request-rate limit toward the EC2 API. |
+| `burst` | int | `10` when zero | Rate-limiter burst. |
+| `maxConcurrent` | int | `5` when zero | Max concurrent in-flight API calls. |
+
+Image syntax accepted in `spec.image` for AWS classes:
+
+- `id:<ami>` — exact AMI ID (e.g. `id:ami-0abc1234567890def`)
+- `name:<pattern>` — available self- and Amazon-owned AMIs by name pattern;
+  the newest wins
+- `snapshot:<k=v>` — available self-owned AMIs by tag equality; the newest
+  wins, a selector matching nothing fails fast as invalid rather than
+  retrying.
+
+The `fleetplane.io/*` identity labels ride as native EC2 instance tags,
+verbatim — AWS tag keys permit dots and slashes, so no codec is involved.
+`spec.location` is an availability zone.
+
+```yaml
+providers:
+  aws-main:
+    driver: aws
+    settings:
+      region: eu-central-1
+      accessKeyId: secret://env/AWS_ACCESS_KEY_ID
+      secretAccessKey: secret://env/AWS_SECRET_ACCESS_KEY
+```
+
+### Driver: `gcp`
+
+Drives `compute.machine` on Google Compute Engine via the compute/v1 REST
+client, which performs no automatic retries — same retry stance as the other
+drivers.
+
+| Setting | Type | Default | Behavior |
+|---|---|---|---|
+| `project` | string | **required** | GCP project ID. Missing project is a boot error. |
+| `zone` | string | **required** | Default zone for instances (e.g. `europe-west3-a`). A class spec's `location` wins over this. Missing zone is a boot error. |
+| `credentialsJson` | string | — | Service-account JSON key; **must** be a `secret://` reference when set (a literal value is a boot error). Omit entirely to use Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud user credentials, metadata server). |
+| `endpoint` | string | — | API endpoint override (test use; disables authentication). |
+| `network` | string | `global/networks/default` | Network for created instances. |
+| `subnetwork` | string | — | Subnetwork for created instances. |
+| `rps` | float | `5` when zero | Request-rate limit toward the GCE API. |
+| `burst` | int | `10` when zero | Rate-limiter burst. |
+| `maxConcurrent` | int | `5` when zero | Max concurrent in-flight API calls. |
+
+Image syntax accepted in `spec.image` for GCP classes:
+
+- `id:<image>` — image in your project by name; a self-link or partial URL
+  passes through
+- `family:<[project/]family>` — latest image in a family (e.g.
+  `family:debian-cloud/debian-12`); a bare family name resolves in your
+  project
+- `name:<[project/]name>` — exact image by name
+- `snapshot:<k=v>` — labeled image in your project; the newest wins, a
+  selector matching nothing fails fast as invalid rather than retrying.
+
+GCE labels are strictly lowercase `[a-z0-9_-]`, so the driver encodes
+Fleetplane's reserved identity labels as `fp-<short>` labels (values
+lowercased, ULID payloads restored on decode); custom label keys from
+`spec.labels` are sanitized to the GCE charset rather than dropped
+([ADR-013](../adr/ADR-013-registration-labels.md)). Minimal service-account
+permissions are in the
+[setup guide](../../SETUP_GUIDE.md#12-provider-credentials-and-permissions).
+
+```yaml
+providers:
+  gcp-main:
+    driver: gcp
+    settings:
+      project: my-project
+      zone: europe-west3-a
+      credentialsJson: secret://file/etc/fleetplane/gcp-sa.json
+```
+
 ### Driver: `fake`
 
 An in-memory provider supporting both `compute.machine` and
@@ -232,6 +356,8 @@ the rest. The shipped driver defaults:
 |---|---|
 | `hetzner` | Hourly increment + `5m` termination buffer for `compute.machine` |
 | `digitalocean` | Hourly increment + `5m` termination buffer for `compute.machine` only |
+| `aws` | `60s` minimum duration, no increment, for `compute.machine` only (per-second billing after the first minute) |
+| `gcp` | `60s` minimum duration, no increment, for `compute.machine` only (per-second billing after the first minute) |
 | `fake` | Whatever its `settings.billing` block declares (zero policy by default) |
 
 A kind with the zero policy — no driver declaration, no override — gets
@@ -253,6 +379,15 @@ providers:
 
 ## classes
 
+> Classes can also be managed at runtime — `POST /v1/classes`, `fleetplane
+> classes`, `apply -f` Class manifests, or the dashboard's Classes view.
+> Config-file classes are seeded into the same registry at boot and stay
+> config-authoritative: they show `source: config` and are read-only through
+> the API (edit this file and restart to change them), and removing one from
+> the file removes it from the registry at the next boot. Templates from
+> both sources are validated against the kind registry.
+
+
 Classes are reusable creation templates (see the design docs,
 [04 §2](../04_API_AND_RESOURCE_MODEL.md)). A resource created "from class
 `ci-large`" expands the class spec; pools also target classes.
@@ -269,11 +404,11 @@ Classes are reusable creation templates (see the design docs,
 
 | Field | Type | Required | Behavior |
 |---|---|---|---|
-| `serverType` | string | yes | Provider server type (e.g. `cpx31` on Hetzner, `s-2vcpu-4gb` on DO). |
+| `serverType` | string | yes | Provider server type (e.g. `cpx31` on Hetzner, `s-2vcpu-4gb` on DO, `t3.medium` on AWS, `e2-medium` on GCP). |
 | `image` | string | yes | Image reference; syntax is per-driver (see the driver sections above). |
-| `location` | string | no | Placement; overrides the provider's default `location`/`region`. |
+| `location` | string | no | Placement; overrides the provider's default `location`/`region`/`zone`. An availability zone on AWS, a zone on GCP. |
 | `userData` | string | no | Cloud-init user data. |
-| `labels` | map | no | Labels applied to the provider resource (verbatim on Hetzner; encoded as tags on DO). |
+| `labels` | map | no | Labels applied to the provider resource (verbatim on Hetzner and AWS; encoded as tags on DO; sanitized to the label charset on GCP). |
 | `readiness` | object | no | Workload readiness probe (below). |
 
 Capacity dimensions for scheduling: `cpu`, `memoryMiB`.
