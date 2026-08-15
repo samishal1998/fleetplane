@@ -30,6 +30,15 @@ func (s *Service) UpsertPool(ctx context.Context, cmd UpsertPoolCmd) (*storage.P
 	if spec.Replicas < 0 {
 		return nil, invalid("pool spec: replicas must be >= 0")
 	}
+	if spec.MinRunning < 0 || spec.MinRunning > spec.Replicas {
+		return nil, invalid("pool spec: minRunning must be between 0 and replicas")
+	}
+	if spec.Reclaim != nil && spec.Reclaim.DeleteAfter.Std() > 0 {
+		// Stage-2 deleteAfter is poolless-only: pool fleet size is owned by
+		// replicas convergence — applying it here would churn delete/create
+		// forever (docs/12 design blocker). Reject loudly over silent-ignore.
+		return nil, invalid("pool spec: reclaim.deleteAfter applies to poolless classes only (pool size is owned by replicas)")
+	}
 	if spec.Class != "" {
 		if _, ok := s.classesResolver().Class(spec.Class); !ok {
 			return nil, invalid("pool spec: unknown class %q", spec.Class)

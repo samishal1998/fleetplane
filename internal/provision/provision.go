@@ -24,6 +24,9 @@ type Providers interface {
 	// (config override > driver capability > zero, docs/11 §3–4); the bool
 	// reports whether the adaptive termination buffer is enabled.
 	Billing(name storage.ProviderInstance, kind string) (provider.BillingPolicy, bool)
+	// Parking resolves the stop/resume capability for an instance+kind
+	// (docs/12); the zero policy means parking is unsupported.
+	Parking(name storage.ProviderInstance, kind string) provider.ParkPolicy
 }
 
 type CreateSpec struct {

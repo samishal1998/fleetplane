@@ -25,11 +25,15 @@ type ec2Stub struct {
 	describeInstances     func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error)
 	runInstances          func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error)
 	terminateInstances    func(*ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error)
+	stopInstances         func(*ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error)
+	startInstances        func(*ec2.StartInstancesInput) (*ec2.StartInstancesOutput, error)
 	describeImages        func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error)
 	describeInstanceTypes func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error)
 	describeRegions       func(*ec2.DescribeRegionsInput) (*ec2.DescribeRegionsOutput, error)
 
 	runCalls           int
+	stopCalls          int
+	startCalls         int
 	describeTypesCalls int
 }
 
@@ -53,6 +57,22 @@ func (s *ec2Stub) TerminateInstances(_ context.Context, in *ec2.TerminateInstanc
 		return nil, errors.New("unexpected TerminateInstances")
 	}
 	return s.terminateInstances(in)
+}
+
+func (s *ec2Stub) StopInstances(_ context.Context, in *ec2.StopInstancesInput, _ ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error) {
+	s.stopCalls++
+	if s.stopInstances == nil {
+		return nil, errors.New("unexpected StopInstances")
+	}
+	return s.stopInstances(in)
+}
+
+func (s *ec2Stub) StartInstances(_ context.Context, in *ec2.StartInstancesInput, _ ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error) {
+	s.startCalls++
+	if s.startInstances == nil {
+		return nil, errors.New("unexpected StartInstances")
+	}
+	return s.startInstances(in)
 }
 
 func (s *ec2Stub) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
@@ -454,6 +474,225 @@ func TestAWSDelete_MarksOpDataAsDelete(t *testing.T) {
 	}
 }
 
+// --- stop / start (parked machines, docs/12) ---
+
+// stopStartStub returns a stub whose DescribeInstances always reports
+// i-abc123 in the given state; Stop/StartInstances succeed and are counted.
+func stopStartStub(state string) *ec2Stub {
+	return &ec2Stub{
+		describeInstances: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+			return reservations(inst("i-abc123", state, identity("op_test"))), nil
+		},
+		stopInstances: func(*ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error) {
+			return &ec2.StopInstancesOutput{}, nil
+		},
+		startInstances: func(*ec2.StartInstancesInput) (*ec2.StartInstancesOutput, error) {
+			return &ec2.StartInstancesOutput{}, nil
+		},
+	}
+}
+
+func TestAWSStopStart_HappyPaths(t *testing.T) {
+	t.Run("StopRunningCallsStopInstances", func(t *testing.T) {
+		var stopped []string
+		stub := stopStartStub("running")
+		stub.stopInstances = func(in *ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error) {
+			stopped = in.InstanceIds
+			return &ec2.StopInstancesOutput{}, nil
+		}
+		d := newTestDriver(stub)
+		ref, err := d.Apply(context.Background(), provider.Action{
+			ActionID: "op_s", Kind: "stop", Ref: &provider.ExternalRef{ID: "i-abc123"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(stopped) != 1 || stopped[0] != "i-abc123" || stub.stopCalls != 1 {
+			t.Fatalf("stopped = %v (calls %d)", stopped, stub.stopCalls)
+		}
+		// The op-kind discriminator rides in Data (per-kind observe predicate).
+		if string(ref.Data) != `{"v":1,"instanceId":"i-abc123","op":"stop"}` {
+			t.Fatalf("op data = %s", ref.Data)
+		}
+	})
+
+	t.Run("StartStoppedCallsStartInstances", func(t *testing.T) {
+		var started []string
+		stub := stopStartStub("stopped")
+		stub.startInstances = func(in *ec2.StartInstancesInput) (*ec2.StartInstancesOutput, error) {
+			started = in.InstanceIds
+			return &ec2.StartInstancesOutput{}, nil
+		}
+		d := newTestDriver(stub)
+		ref, err := d.Apply(context.Background(), provider.Action{
+			ActionID: "op_s", Kind: "start", Ref: &provider.ExternalRef{ID: "i-abc123"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(started) != 1 || started[0] != "i-abc123" || stub.startCalls != 1 {
+			t.Fatalf("started = %v (calls %d)", started, stub.startCalls)
+		}
+		if string(ref.Data) != `{"v":1,"instanceId":"i-abc123","op":"start"}` {
+			t.Fatalf("op data = %s", ref.Data)
+		}
+	})
+}
+
+// TestAWSStopStart_Idempotency: THE docs/12 §3 contract — stop of a
+// stopped/stopping machine and start of a running/pending machine succeed
+// WITHOUT re-mutating, which makes crash-duplicated dispatch harmless.
+func TestAWSStopStart_Idempotency(t *testing.T) {
+	for _, state := range []string{"stopped", "stopping"} {
+		stub := stopStartStub(state)
+		d := newTestDriver(stub)
+		ref, err := d.Apply(context.Background(), provider.Action{
+			ActionID: "op_s", Kind: "stop", Ref: &provider.ExternalRef{ID: "i-abc123"},
+		})
+		if err != nil {
+			t.Fatalf("stop of %s must succeed: %v", state, err)
+		}
+		if stub.stopCalls != 0 {
+			t.Fatalf("stop of %s re-mutated: %d StopInstances calls", state, stub.stopCalls)
+		}
+		if ref.Ref == nil || ref.Ref.ID != "i-abc123" || len(ref.Data) == 0 {
+			t.Fatalf("stop of %s ref = %+v", state, ref)
+		}
+	}
+	for _, state := range []string{"running", "pending"} {
+		stub := stopStartStub(state)
+		d := newTestDriver(stub)
+		ref, err := d.Apply(context.Background(), provider.Action{
+			ActionID: "op_s", Kind: "start", Ref: &provider.ExternalRef{ID: "i-abc123"},
+		})
+		if err != nil {
+			t.Fatalf("start of %s must succeed: %v", state, err)
+		}
+		if stub.startCalls != 0 {
+			t.Fatalf("start of %s re-mutated: %d StartInstances calls", state, stub.startCalls)
+		}
+		if ref.Ref == nil || ref.Ref.ID != "i-abc123" || len(ref.Data) == 0 {
+			t.Fatalf("start of %s ref = %+v", state, ref)
+		}
+	}
+}
+
+// TestAWSStopStart_VanishedIsNotFound: a machine that vanished — API 404,
+// empty describe, or the terminated/shutting-down ghost states — yields
+// ErrNotFound for both actions (docs/12 §7: the op fails and reverts).
+func TestAWSStopStart_VanishedIsNotFound(t *testing.T) {
+	stubs := map[string]func() *ec2Stub{
+		"APINotFound": func() *ec2Stub {
+			return &ec2Stub{describeInstances: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+				return nil, apiErr{"InvalidInstanceID.NotFound", "gone"}
+			}}
+		},
+		"EmptyDescribe": func() *ec2Stub {
+			return &ec2Stub{describeInstances: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+				return &ec2.DescribeInstancesOutput{}, nil
+			}}
+		},
+		"TerminatedGhost":   func() *ec2Stub { return stopStartStub("terminated") },
+		"ShuttingDownGhost": func() *ec2Stub { return stopStartStub("shutting-down") },
+	}
+	for name, mk := range stubs {
+		for _, kind := range []string{"stop", "start"} {
+			stub := mk()
+			d := newTestDriver(stub)
+			_, err := d.Apply(context.Background(), provider.Action{
+				ActionID: "op_v", Kind: kind, Ref: &provider.ExternalRef{ID: "i-abc123"},
+			})
+			if !provider.IsClass(err, provider.ErrNotFound) {
+				t.Fatalf("%s/%s: err = %v, want ErrNotFound", name, kind, err)
+			}
+			if stub.stopCalls+stub.startCalls != 0 {
+				t.Fatalf("%s/%s: mutated a vanished machine", name, kind)
+			}
+		}
+	}
+}
+
+// TestAWSStopStart_StateRaceConverges: the state changes BETWEEN the
+// idempotency read and the mutating call (docs/12 §7 race — e.g. a
+// crash-duplicated dispatch already stopped the machine, and EC2 refuses the
+// second mutation with IncorrectInstanceState). The error must map to
+// retryable+EffectNone so the engine's bounded park re-dispatch runs, and the
+// NEXT dispatch's fresh idempotency read must short-circuit to SUCCESS
+// without re-mutating.
+func TestAWSStopStart_StateRaceConverges(t *testing.T) {
+	cases := []struct {
+		kind       string
+		readState  string // what the pre-mutation describe reports
+		afterState string // where the racer actually left the machine
+	}{
+		{"stop", "running", "stopped"},
+		{"start", "stopped", "running"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			state := tc.readState
+			stub := &ec2Stub{
+				describeInstances: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+					return reservations(inst("i-abc123", state, identity("op_test"))), nil
+				},
+				stopInstances: func(*ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error) {
+					return nil, apiErr{"IncorrectInstanceState", "instance is not in a state from which it can be stopped"}
+				},
+				startInstances: func(*ec2.StartInstancesInput) (*ec2.StartInstancesOutput, error) {
+					return nil, apiErr{"IncorrectInstanceState", "instance is not in a state from which it can be started"}
+				},
+			}
+			d := newTestDriver(stub)
+			action := provider.Action{ActionID: "op_race", Kind: tc.kind, Ref: &provider.ExternalRef{ID: "i-abc123"}}
+
+			// Dispatch 1: the read is stale; the mutation is refused.
+			_, err := d.Apply(context.Background(), action)
+			if !provider.IsClass(err, provider.ErrRetryable) {
+				t.Fatalf("raced %s: class = %v, want retryable (re-dispatch, never revert)", tc.kind, provider.Classify(err))
+			}
+			if provider.Effect(err) != provider.EffectNone {
+				t.Fatalf("raced %s: effect = %v, want none (refused outright)", tc.kind, provider.Effect(err))
+			}
+
+			// Dispatch 2 (the engine's park re-dispatch): the fresh read sees
+			// the racer's outcome and short-circuits to idempotent success.
+			state = tc.afterState
+			mutations := stub.stopCalls + stub.startCalls
+			ref, err := d.Apply(context.Background(), action)
+			if err != nil {
+				t.Fatalf("re-dispatched %s must succeed idempotently: %v", tc.kind, err)
+			}
+			if stub.stopCalls+stub.startCalls != mutations {
+				t.Fatalf("re-dispatched %s re-mutated an already-%s machine", tc.kind, tc.afterState)
+			}
+			if ref.Ref == nil || ref.Ref.ID != "i-abc123" || len(ref.Data) == 0 {
+				t.Fatalf("re-dispatched %s ref = %+v", tc.kind, ref)
+			}
+		})
+	}
+}
+
+// TestAWSStop_UnsupportedInstanceIsInvalid: EC2 rejects stop on spot and
+// instance-store-backed instances with UnsupportedOperation. The mapping is
+// a design blocker: invalid + EffectNone fails fast so the kernel cleanly
+// reverts parking→ready and falls back to delete/create for that machine.
+func TestAWSStop_UnsupportedInstanceIsInvalid(t *testing.T) {
+	stub := stopStartStub("running")
+	stub.stopInstances = func(*ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error) {
+		return nil, apiErr{"UnsupportedOperation", "spot instances cannot be stopped"}
+	}
+	d := newTestDriver(stub)
+	_, err := d.Apply(context.Background(), provider.Action{
+		ActionID: "op_u", Kind: "stop", Ref: &provider.ExternalRef{ID: "i-abc123"},
+	})
+	if !provider.IsClass(err, provider.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid (fail fast, never retry)", err)
+	}
+	if provider.Effect(err) != provider.EffectNone {
+		t.Fatalf("effect = %v, want none (the request was refused outright)", provider.Effect(err))
+	}
+}
+
 // --- discover ---
 
 func TestAWSDiscover_OwnedScopeFiltersAndDecode(t *testing.T) {
@@ -667,6 +906,143 @@ func TestAWSObserveOperation(t *testing.T) {
 			t.Fatalf("status = %+v", status)
 		}
 	})
+
+	// Per-kind terminal predicates (docs/12 design blocker): a stop succeeds
+	// ONLY on observed "stopped", a start ONLY on observed "running" — never
+	// the create predicate.
+	stopData, _ := json.Marshal(opData{V: 1, InstanceID: "i-abc123", Op: "stop"})
+	startData, _ := json.Marshal(opData{V: 1, InstanceID: "i-abc123", Op: "start"})
+
+	t.Run("StopWhileStillRunningIsNotSuccess", func(t *testing.T) {
+		// The create predicate would call "running" success — the stop
+		// predicate must not.
+		status, err := observeWith("running").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: stopData})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpRunning {
+			t.Fatalf("stop op on running machine = %+v, want keep-polling", status)
+		}
+	})
+
+	t.Run("StopStoppingKeepsPolling", func(t *testing.T) {
+		status, err := observeWith("stopping").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: stopData})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpRunning {
+			t.Fatalf("status = %+v", status)
+		}
+	})
+
+	t.Run("StopStoppedSucceedsWithPhaseStopped", func(t *testing.T) {
+		status, err := observeWith("stopped").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: stopData})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpSucceeded || status.Resource == nil || status.Resource.Phase != provider.PhaseStopped {
+			t.Fatalf("status = %+v", status)
+		}
+	})
+
+	t.Run("StartWhileStoppedOrPendingKeepsPolling", func(t *testing.T) {
+		for _, state := range []string{"stopped", "pending"} {
+			status, err := observeWith(state).ObserveOperation(context.Background(),
+				provider.OperationRef{ActionID: "op_test", Ref: ref, Data: startData})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != provider.OpRunning {
+				t.Fatalf("start op on %s machine = %+v, want keep-polling", state, status)
+			}
+		}
+	})
+
+	t.Run("StartRunningSucceedsWithFreshAddresses", func(t *testing.T) {
+		status, err := observeWith("running").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: startData})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpSucceeded || status.Resource == nil || status.Resource.Phase != provider.PhaseRunning {
+			t.Fatalf("status = %+v", status)
+		}
+		// The public IP usually changes across stop/start: the success
+		// snapshot must be the FULL fresh observation, addresses included.
+		if len(status.Resource.Addresses) == 0 || len(status.Resource.Extensions) == 0 {
+			t.Fatalf("start success snapshot incomplete: %+v", status.Resource)
+		}
+	})
+
+	t.Run("StopStartVanishedIsNotFound", func(t *testing.T) {
+		for _, data := range [][]byte{stopData, startData} {
+			// API-level 404 mid-op.
+			d := newTestDriver(&ec2Stub{
+				describeInstances: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+					return nil, apiErr{"InvalidInstanceID.NotFound", "gone"}
+				},
+			})
+			if _, err := d.ObserveOperation(context.Background(),
+				provider.OperationRef{ActionID: "op_test", Ref: ref, Data: data}); !provider.IsClass(err, provider.ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+			// Terminated-but-still-visible ghost counts as vanished too.
+			if _, err := observeWith("terminated").ObserveOperation(context.Background(),
+				provider.OperationRef{ActionID: "op_test", Ref: ref, Data: data}); !provider.IsClass(err, provider.ErrNotFound) {
+				t.Fatalf("ghost err = %v, want ErrNotFound", err)
+			}
+		}
+	})
+
+	t.Run("LostDataDegradesToOpUnknownNeverFalseSuccess", func(t *testing.T) {
+		// With Data nil/corrupt the op kind is unknowable: guessing the
+		// create predicate could falsely succeed a stop on a still-running
+		// machine (docs/12 design blocker). OpUnknown keeps the engine
+		// polling instead.
+		for _, data := range []json.RawMessage{nil, json.RawMessage(`{"v":1}`), json.RawMessage(`not-json`)} {
+			status, err := observeWith("running").ObserveOperation(context.Background(),
+				provider.OperationRef{ActionID: "op_test", Ref: ref, Data: data})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != provider.OpUnknown {
+				t.Fatalf("Data=%q status = %+v, want OpUnknown", data, status)
+			}
+		}
+	})
+
+	t.Run("UnknownOpDiscriminatorDegradesToOpUnknown", func(t *testing.T) {
+		// An op discriminator this build does not recognize (version skew,
+		// foreign data) must NOT fall through to the create predicate — on a
+		// running machine that would falsely succeed a stop-shaped op. The
+		// only safe degradation is OpUnknown, same as lost Data.
+		unknown := json.RawMessage(`{"v":1,"instanceId":"i-abc123","op":"reboot"}`)
+		status, err := observeWith("running").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: unknown})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpUnknown {
+			t.Fatalf("unknown op discriminator status = %+v, want OpUnknown", status)
+		}
+	})
+
+	t.Run("LegacyCreateDataStillUsesCreatePredicate", func(t *testing.T) {
+		// Pre-parking Data was only ever create- or delete-shaped, so an
+		// instanceId without discriminator decodes as a create (backward
+		// compatible with in-flight ops across the upgrade).
+		status, err := observeWith("running").ObserveOperation(context.Background(),
+			provider.OperationRef{ActionID: "op_test", Ref: ref, Data: json.RawMessage(`{"v":1,"instanceId":"i-abc123"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != provider.OpSucceeded {
+			t.Fatalf("status = %+v", status)
+		}
+	})
 }
 
 // --- billing + descriptor contract ---
@@ -698,6 +1074,24 @@ func TestAWSBillingPolicyContract(t *testing.T) {
 	}
 }
 
+// --- parking capability contract ---
+
+func TestAWSParkingPolicyContract(t *testing.T) {
+	d := newTestDriver(&ec2Stub{})
+	var pa provider.ParkAware = d // compile-time capability check
+
+	pol := pa.Parking(compute.Kind)
+	if !pol.Supported || pol.StartEstimate != 30*time.Second {
+		t.Fatalf("compute.machine park policy = %+v, want {true 30s}", pol)
+	}
+	if again := pa.Parking(compute.Kind); again != pol {
+		t.Fatalf("park policy unstable: %+v vs %+v", pol, again)
+	}
+	if und := pa.Parking(provider.ResourceKind("storage.volume")); und != (provider.ParkPolicy{}) {
+		t.Fatalf("undeclared kind park policy = %+v, want zero", und)
+	}
+}
+
 func TestAWSRegistered(t *testing.T) {
 	for _, name := range provider.Drivers() {
 		if name == Driver {
@@ -725,6 +1119,12 @@ func TestAWSErrorMapping(t *testing.T) {
 		{"InvalidInstanceID.NotFound", provider.ErrNotFound, provider.EffectNone},
 		{"InvalidAMIID.NotFound", provider.ErrNotFound, provider.EffectNone},
 		{"InvalidInstanceID.Malformed", provider.ErrInvalid, provider.EffectNone},
+		// Spot/instance-store stop rejection (docs/12 §3): fail fast so the
+		// kernel reverts parking→ready instead of retrying forever.
+		{"UnsupportedOperation", provider.ErrInvalid, provider.EffectNone},
+		// The stop/start state race (docs/12): refused outright, retryable —
+		// never invalid, which would falsely revert a mid-transition machine.
+		{"IncorrectInstanceState", provider.ErrRetryable, provider.EffectNone},
 		{"InternalError", provider.ErrRetryable, provider.EffectMaybe},
 	}
 	for _, tc := range cases {
@@ -779,6 +1179,20 @@ func TestAWSApply_PreflightFailureIsEffectNone(t *testing.T) {
 	})
 	if err == nil || provider.Effect(err) != provider.EffectNone {
 		t.Fatalf("pre-flight delete effect = maybe, want none (err = %v)", err)
+	}
+
+	// Stop/start are paced too: the pre-flight gate aborts before the state
+	// read, let alone the mutation.
+	for _, kind := range []string{"stop", "start"} {
+		_, err = d.Apply(ctx, provider.Action{
+			ActionID: "op_pre_" + kind, Kind: kind, Ref: &provider.ExternalRef{ID: "i-x"},
+		})
+		if err == nil || provider.Effect(err) != provider.EffectNone {
+			t.Fatalf("pre-flight %s effect = maybe, want none (err = %v)", kind, err)
+		}
+	}
+	if stub.stopCalls+stub.startCalls != 0 {
+		t.Fatal("stop/start mutated after pre-flight failure")
 	}
 }
 

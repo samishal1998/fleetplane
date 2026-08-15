@@ -105,14 +105,14 @@
   }
 
   // Fixed phase → color-token mapping (identity is always color + text).
-  const PHASES = ['requested', 'provisioning', 'ready', 'allocated', 'draining', 'deleting', 'failed', 'orphaned'];
+  const PHASES = ['provisioning', 'starting', 'ready', 'allocated', 'parking', 'parked', 'draining', 'deleting', 'failed', 'orphaned', 'unknown'];
   function phaseVar(p) { return PHASES.includes(p) ? '--ph-' + p : '--muted'; }
   function opToneVar(s) {
     if (s === 'succeeded') return '--st-good';
     if (s === 'failed' || s === 'aborted') return '--st-critical';
     if (s === 'uncertain') return '--st-serious';
     if (s === 'verifying') return '--st-warn';
-    return '--ph-requested'; // journaled / in_flight / external_accepted: in progress
+    return '--ph-provisioning'; // journaled / in_flight / external_accepted: in progress
   }
   function healthToneVar(s) {
     if (s === 'healthy') return '--st-good';
@@ -377,7 +377,9 @@
       <div class="tiles">
         <div class="tile"><div class="t-label">Resources</div><div class="t-value">{{ live.length }}</div>
           <div class="t-sub">{{ byPhase.ready }} ready · {{ byPhase.allocated }} allocated</div></div>
-        <div class="tile"><div class="t-label">Provisioning</div><div class="t-value">{{ byPhase.provisioning + byPhase.requested }}</div></div>
+        <div class="tile"><div class="t-label">Provisioning</div><div class="t-value">{{ byPhase.provisioning + byPhase.starting }}</div></div>
+        <div class="tile"><div class="t-label">Parked</div><div class="t-value">{{ byPhase.parked }}</div>
+          <div class="t-sub">near-free warm tier</div></div>
         <div class="tile"><div class="t-label">Active operations</div><div class="t-value">{{ activeOps.length }}</div></div>
         <div class="tile" :class="{alert: uncertainOps.length > 0}">
           <div class="t-label">{{ uncertainOps.length ? '⚠ Uncertain operations' : 'Uncertain operations' }}</div>
@@ -582,6 +584,20 @@
           toast('Draining ' + this.id);
         } catch (e) { toastErr(e); }
       },
+      async park() {
+        try {
+          await api('POST', '/v1/resources/' + this.id + ':park');
+          toast('Parking ' + this.id);
+          this.load(true);
+        } catch (e) { toastErr(e); }
+      },
+      async startUp() {
+        try {
+          await api('POST', '/v1/resources/' + this.id + ':start');
+          toast('Starting ' + this.id);
+          this.load(true);
+        } catch (e) { toastErr(e); }
+      },
     },
     template: `
     <div>
@@ -589,6 +605,9 @@
         <h1><a href="#/resources">Resources</a> / <span class="mono">{{ id }}</span></h1>
         <div class="grow"></div>
         <template v-if="r && !r.metadata.deletedAt">
+          <button v-if="r.status.phase === 'ready'" class="btn" @click="park" :disabled="busy"
+                  title="Stop into the near-free parked tier">Park</button>
+          <button v-if="r.status.phase === 'parked'" class="btn primary" @click="startUp" :disabled="busy">Start</button>
           <button class="btn" @click="drain" :disabled="busy">Drain</button>
           <button class="btn danger" @click="askDelete" :disabled="busy || r.metadata.protected"
                   :title="r.metadata.protected ? 'delete-protected' : ''">Delete…</button>
@@ -606,6 +625,7 @@
             <dt>Class</dt><dd>{{ r.spec.class || '—' }}</dd>
             <dt>Ownership</dt><dd>{{ r.metadata.ownership }}<span v-if="r.metadata.protected"> · 🔒 protected</span></dd>
             <dt>External ID</dt><dd class="mono">{{ r.status.externalId || '—' }}</dd>
+            <dt v-if="r.status.parkedAt">Parked since</dt><dd v-if="r.status.parkedAt">{{ $time(r.status.parkedAt) }} ({{ $ago(r.status.parkedAt) }})</dd>
             <dt>Created</dt><dd>{{ $time(r.metadata.createdAt) }} ({{ $ago(r.metadata.createdAt) }})</dd>
             <dt>Updated</dt><dd>{{ $time(r.metadata.updatedAt) }}</dd>
             <dt>Generation</dt><dd>{{ r.metadata.generation }} (observed {{ r.metadata.observedGeneration }})</dd>
@@ -885,7 +905,7 @@
           <tbody><tr v-for="a in acqs" :key="a.id" class="rowlink" @click="$nav('/acquisitions/' + a.id)">
             <td class="id">{{ a.id }}</td>
             <td><op-badge v-if="a.state === 'failed' || a.state === 'expired'" :state="'failed'"></op-badge>
-                <span v-else class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' : 'var(--ph-requested)'}"></span>{{ a.state }}</span></td>
+                <span v-else class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' : 'var(--ph-provisioning)'}"></span>{{ a.state }}</span></td>
             <td>{{ a.class || '—' }}</td>
             <td class="id"><a v-if="a.resourceId" :href="'#/resources/' + a.resourceId" @click.stop>{{ a.resourceId }}</a></td>
             <td class="sub">{{ $ago(a.createdAt) }}</td><td></td>
@@ -947,7 +967,7 @@
         <dl class="kv">
           <dt>State</dt><dd>
             <span class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' :
-              (a.state === 'failed' || a.state === 'expired' ? 'var(--st-critical)' : 'var(--ph-requested)')}"></span>
+              (a.state === 'failed' || a.state === 'expired' ? 'var(--st-critical)' : 'var(--ph-provisioning)')}"></span>
               {{ a.state }}</span>
             <span v-if="a.state === 'pending' || a.state === 'provisioning'" class="wip" style="margin-left:8px"></span></dd>
           <dt>Class</dt><dd>{{ a.class || '—' }}</dd>
@@ -973,7 +993,7 @@
     data() {
       return {
         items: [], providers: [], detail: null, showCreate: false, busy: false, formErr: '',
-        form: { name: '', kind: 'compute.machine', provider: '', template: CLASS_TMPL, reclaim: '', maxWait: '' },
+        form: { name: '', kind: 'compute.machine', provider: '', template: CLASS_TMPL, reclaim: '', park: '', deleteAfter: '', maxWait: '' },
       };
     },
     watch: {
@@ -1009,7 +1029,12 @@
           metadata: { name: this.form.name },
           spec: { kind: this.form.kind, provider: this.form.provider, template: template },
         };
-        if (this.form.reclaim) body.spec.reclaim = { idleAfter: this.form.reclaim };
+        if (this.form.reclaim || this.form.park || this.form.deleteAfter) {
+          body.spec.reclaim = {};
+          if (this.form.reclaim) body.spec.reclaim.idleAfter = this.form.reclaim;
+          if (this.form.park) body.spec.reclaim.park = this.form.park;
+          if (this.form.deleteAfter) body.spec.reclaim.deleteAfter = this.form.deleteAfter;
+        }
         if (this.form.maxWait) body.spec.scheduling = { queue: { maxWait: this.form.maxWait } };
         this.busy = true;
         try {
@@ -1081,6 +1106,13 @@
           <div class="hint">Validated against the kind registry when you submit — a bad template never reaches provisioning.</div>
           <label class="f" for="c-reclaim">Idle reclaim (optional)</label>
           <input id="c-reclaim" type="text" v-model="form.reclaim" placeholder="5m">
+          <label class="f" for="c-park">Park (optional)</label>
+          <select id="c-park" v-model="form.park">
+            <option value="">auto (park on capable providers)</option>
+            <option value="never">never (always delete)</option>
+          </select>
+          <label class="f" for="c-delafter">Delete after parked (optional)</label>
+          <input id="c-delafter" type="text" v-model="form.deleteAfter" placeholder="4h">
           <label class="f" for="c-wait">Queue budget (optional)</label>
           <input id="c-wait" type="text" v-model="form.maxWait" placeholder="10m">
           <div v-if="formErr" class="field-err">{{ formErr }}</div>

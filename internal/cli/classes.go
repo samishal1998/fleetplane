@@ -27,17 +27,25 @@ func classesCmd(r *root) *cobra.Command {
 				return printJSON(cmd, classes)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tKIND\tPROVIDER\tSOURCE\tRECLAIM\tQUEUE")
+			fmt.Fprintln(w, "NAME\tKIND\tPROVIDER\tSOURCE\tRECLAIM\tPARK\tDELETE-AFTER\tQUEUE")
 			for _, c := range classes {
-				reclaim, queue := "-", "-"
-				if c.Spec.Reclaim != nil && c.Spec.Reclaim.IdleAfter != "" {
-					reclaim = c.Spec.Reclaim.IdleAfter
+				reclaim, park, delAfter, queue := "-", "auto", "-", "-"
+				if cr := c.Spec.Reclaim; cr != nil {
+					if cr.IdleAfter != "" {
+						reclaim = cr.IdleAfter
+					}
+					if cr.Park != "" {
+						park = cr.Park
+					}
+					if cr.DeleteAfter != "" {
+						delAfter = cr.DeleteAfter
+					}
 				}
 				if c.Spec.Scheduling != nil && c.Spec.Scheduling.Queue != nil && c.Spec.Scheduling.Queue.MaxWait != "" {
 					queue = c.Spec.Scheduling.Queue.MaxWait
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-					c.Metadata.Name, c.Spec.Kind, c.Spec.Provider, c.Source, reclaim, queue)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					c.Metadata.Name, c.Spec.Kind, c.Spec.Provider, c.Source, reclaim, park, delAfter, queue)
 			}
 			return w.Flush()
 		},
@@ -62,7 +70,7 @@ func classGetCmd(r *root) *cobra.Command {
 }
 
 func classCreateCmd(r *root) *cobra.Command {
-	var kind, provider, template, templateFile, reclaimIdle, queueMaxWait string
+	var kind, provider, template, templateFile, reclaimIdle, reclaimPark, reclaimDeleteAfter, queueMaxWait string
 	cmd := &cobra.Command{
 		Use:   "create NAME",
 		Short: "Create a class (template validated against the kind registry)",
@@ -84,8 +92,9 @@ func classCreateCmd(r *root) *cobra.Command {
 				Metadata: apiclient.Metadata{Name: args[0]},
 				Spec:     apiclient.ClassSpec{Kind: kind, Provider: provider, Template: tpl},
 			}
-			if reclaimIdle != "" {
-				m.Spec.Reclaim = &apiclient.ClassReclaim{IdleAfter: reclaimIdle}
+			if reclaimIdle != "" || reclaimPark != "" || reclaimDeleteAfter != "" {
+				m.Spec.Reclaim = &apiclient.ClassReclaim{
+					IdleAfter: reclaimIdle, Park: reclaimPark, DeleteAfter: reclaimDeleteAfter}
 			}
 			if queueMaxWait != "" {
 				m.Spec.Scheduling = &apiclient.ClassScheduling{Queue: &apiclient.ClassQueue{MaxWait: queueMaxWait}}
@@ -103,6 +112,8 @@ func classCreateCmd(r *root) *cobra.Command {
 	cmd.Flags().StringVar(&template, "template", "", "kind-specific spec as inline JSON")
 	cmd.Flags().StringVar(&templateFile, "template-file", "", "kind-specific spec from a JSON file")
 	cmd.Flags().StringVar(&reclaimIdle, "reclaim-idle-after", "", "idle reclamation policy, e.g. 5m")
+	cmd.Flags().StringVar(&reclaimPark, "reclaim-park", "", "stage-1 disposition on park-capable providers: auto (default) | never (docs/12)")
+	cmd.Flags().StringVar(&reclaimDeleteAfter, "reclaim-delete-after", "", "delete machines parked this long, e.g. 4h (poolless classes)")
 	cmd.Flags().StringVar(&queueMaxWait, "queue-max-wait", "", "acquisition queue budget, e.g. 10m (docs/11)")
 	_ = cmd.MarkFlagRequired("provider")
 	return cmd

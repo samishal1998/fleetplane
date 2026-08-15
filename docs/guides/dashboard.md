@@ -35,12 +35,12 @@ requires `provider.admin`.
 
 | View | Shows | Actions |
 |---|---|---|
-| Overview | Stat tiles (resources, provisioning, active + uncertain operations, pools, provider health), fleet-by-phase distribution, recent events | — |
+| Overview | Stat tiles (resources, provisioning, **parked**, active + uncertain operations, pools, provider health), fleet-by-phase distribution, recent events | — |
 | Resources | All live resources with phase, class, provider, external ID | Create (kind, provider, spec JSON, labels), open detail |
-| Resource detail | Metadata, spec, capacity, provider extensions (verbatim, invariant 6), open operations, events | Drain, delete (dry-run preview first, then journaled delete) |
+| Resource detail | Metadata, spec, capacity, provider extensions (verbatim, invariant 6), open operations, events, "Parked since" while parked | Park (shown on `ready` machines), Start (shown on `parked` machines), drain, delete (dry-run preview first, then journaled delete) |
 | Pools | Declared pools with class, replicas, minReady | Create pool |
 | Pool detail | Spec, generation, resources in the pool's class | Scale replicas (±), edit spec JSON, reconcile now |
-| Classes | All classes (config + api) with kind, provider, source, policies | Create class (template validated on submit), delete api-managed classes, view template |
+| Classes | All classes (config + api) with kind, provider, source, policies | Create class (template validated on submit; policy fields: idle reclaim, park, delete-after-parked, queue budget), delete api-managed classes, view template |
 | Acquisitions | Acquisitions created from this browser (the API has no list endpoint), lookup by ID | Acquire (class, TTL, constraints, exclusive), release |
 | Operations | **Open** (non-terminal) operations; terminal ones are visible in events | Resolve uncertain operations (`retry-verification` / `mark-failed`) |
 | Events | Recent events, newest first, free-text filter | — |
@@ -53,6 +53,12 @@ Notes that follow from the API's semantics:
 - **Delete is two-step**: the dashboard first calls `DELETE …?dryRun=true` and
   shows the server's answer before performing the real journaled delete with an
   idempotency key. Delete-protected resources cannot be deleted from the UI.
+- **Park and Start** call `POST …:park` / `…:start`
+  ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)):
+  Park appears only on `ready` machines, Start only on `parked` ones, and the
+  detail view keeps refreshing while the machine transits `parking`/`starting`.
+  The three warm-tier phases have their own colors in the phase distribution
+  and phase badges.
 - **The operations list is open-only** by design ([`GET /v1/operations`](api.md)
   returns non-terminal operations); completed operations are audited through
   events and `GET /v1/operations/{id}`.

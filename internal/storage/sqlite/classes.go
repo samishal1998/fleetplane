@@ -2,23 +2,26 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/samishal1998/fleetplane/internal/storage"
 )
 
 type classStore stores
 
-const classCols = `name, kind, provider, spec_json, reclaim_idle_after_ms, queue_max_wait_ms, source, created_at, updated_at`
+const classCols = `name, kind, provider, spec_json, reclaim_idle_after_ms, reclaim_park, reclaim_delete_after_ms, queue_max_wait_ms, source, created_at, updated_at`
 
 func (cs classStore) Upsert(ctx context.Context, c *storage.ClassRecord) error {
-	_, err := cs.q.ExecContext(ctx, `INSERT INTO classes (`+classCols+`) VALUES (?,?,?,?,?,?,?,?,?)
+	_, err := cs.q.ExecContext(ctx, `INSERT INTO classes (`+classCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET
 			kind=excluded.kind, provider=excluded.provider, spec_json=excluded.spec_json,
 			reclaim_idle_after_ms=excluded.reclaim_idle_after_ms,
+			reclaim_park=excluded.reclaim_park,
+			reclaim_delete_after_ms=excluded.reclaim_delete_after_ms,
 			queue_max_wait_ms=excluded.queue_max_wait_ms,
 			source=excluded.source, updated_at=excluded.updated_at`,
 		c.Name, c.Kind, string(c.Provider), string(c.Spec),
-		c.ReclaimIdleAfterMs, c.QueueMaxWaitMs, c.Source, c.CreatedAt, c.UpdatedAt)
+		c.ReclaimIdleAfterMs, nsStr(c.ReclaimPark), c.ReclaimDeleteAfterMs, c.QueueMaxWaitMs, c.Source, c.CreatedAt, c.UpdatedAt)
 	return mapErr(err)
 }
 
@@ -65,11 +68,13 @@ func (cs classStore) Delete(ctx context.Context, name string) error {
 func scanClass(row rowScanner) (*storage.ClassRecord, error) {
 	var c storage.ClassRecord
 	var provider, spec string
+	var park sql.NullString
 	if err := row.Scan(&c.Name, &c.Kind, &provider, &spec,
-		&c.ReclaimIdleAfterMs, &c.QueueMaxWaitMs, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&c.ReclaimIdleAfterMs, &park, &c.ReclaimDeleteAfterMs, &c.QueueMaxWaitMs, &c.Source, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, mapErr(err)
 	}
 	c.Provider = storage.ProviderInstance(provider)
 	c.Spec = []byte(spec)
+	c.ReclaimPark = park.String // NULL and "" both canonicalize to auto
 	return &c, nil
 }

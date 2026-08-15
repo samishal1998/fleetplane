@@ -175,8 +175,9 @@ scrape_configs:
 Two label vocabularies you will alert on:
 
 - Resource phases: `unknown`, `provisioning`, `ready`, `allocated`,
-  `draining`, `deleting`, `failed`, `orphaned` (there is no `deleted` phase —
-  deletion is a storage tombstone, [ADR-017](../adr/ADR-017-operation-states.md)).
+  `parking`, `parked`, `starting`, `draining`, `deleting`, `failed`,
+  `orphaned` (there is no `deleted` phase — deletion is a storage tombstone,
+  [ADR-017](../adr/ADR-017-operation-states.md)).
 - Non-terminal operation states: `journaled`, `in_flight`,
   `external_accepted`, `verifying`, `uncertain`.
 
@@ -212,6 +213,51 @@ should stay **around 0** (if it climbs, raise the kind's `terminationBuffer`
 or enable `adaptive`), and `window_missed_total` should stay **near 0**
 (persistent misses mean the buffer and sweep cadence leave the termination
 window practically unhittable).
+
+### Parked-machines metrics
+
+Three series cover
+[parked machines](concepts.md#parked-machines-the-warm-tier)
+([design doc 12](../12_PARKED_MACHINES.md),
+[ADR-019](../adr/ADR-019-parked-machines.md)). Like the cost metrics they
+are event-driven and process-lifetime — use `rate()`/`increase()`:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `fleetplane_resource_park_total` | counter | `provider` | Machines parked (stopped into the storage-price tier) |
+| `fleetplane_resource_start_total` | counter | `provider` | Parked machines started back into service |
+| `fleetplane_resource_start_seconds` | histogram | `provider` | Start operation duration, journal to `ready` including the readiness probe — this histogram feeds the scheduler's queue-wait estimates |
+
+The warm tier itself is visible in the existing fleet gauge:
+`fleetplane_resources{phase="parked"}` (plus the transient `parking` and
+`starting` phases).
+
+### Machines sitting in `parking` or `starting`
+
+`parking` and `starting` are operation-in-flight phases; a machine should
+pass through them in seconds to a couple of minutes. If one lingers:
+
+- **Find the operation**: `fleetplane operations` — the open
+  `resource.stop` / `resource.start` operation names the resource and its
+  attempt count.
+- **Stop/start ops self-heal**: they are idempotent at the driver, so
+  retries are plain re-dispatch — they never freeze `uncertain` for
+  duplication reasons. Re-dispatch is **capped at 8 attempts**; past the
+  cap the operation fails and the phase **reverts** (`parking → ready`,
+  `starting → parked`), so a broken provider can never wedge a machine in a
+  transitional phase. A failed start re-stamps `parkedAt`, so the machine is
+  not immediately stage-2 deleted.
+- **One asymmetric case**: a start that *succeeded* at the provider but
+  exhausted the readiness probe lands `failed` — the machine is running at
+  full price and unhealthy, so failed-cleanup deletes it rather than
+  pretending it is parked.
+- **Out-of-band stops are observation-only**: stopping a managed machine in
+  the provider console does not move its Fleetplane phase to `parked` — the
+  sweep records the stopped observation, nothing more (adoption of
+  out-of-band stops is deferred, [ADR-019](../adr/ADR-019-parked-machines.md) §10).
+  Park through Fleetplane instead. The exceptions discovery does handle: an
+  `orphaned` machine re-observed *stopped* revives to `parked`, and
+  re-adopted stopped machines are minted `parked` on park-capable providers.
 
 ### What to alert on
 

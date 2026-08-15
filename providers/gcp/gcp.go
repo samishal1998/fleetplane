@@ -17,6 +17,24 @@
 // zones — creates honor spec.location, so owned instances may live outside
 // the default zone); create-dedup lists the deterministic create zone. The
 // zone travels in ExternalRef.Extra["zone"] for Get/delete/observe.
+//
+// Parking (docs/12): compute.machine supports the "stop" and "start"
+// actions. Both are IDEMPOTENT — Apply(stop) against an instance already
+// stopped (or stopping) and Apply(start) against one already running (or
+// starting) succeed without a mutation; the returned Data then carries no
+// zonal operation, so ObserveOperation verifies by instance state alone.
+// The race is covered too: a mutation GCE rejects because the instance
+// reached the target state between the dedup read and the call resolves to
+// the same no-op success via one re-read. Terminal predicates are PER OP
+// KIND: a stop succeeds only when the instance is observed in a settled
+// power-off state (TERMINATED/STOPPED/SUSPENDED), a start only when
+// observed RUNNING — never the create predicate. GCE RELEASES THE EPHEMERAL EXTERNAL IP at
+// stop, so a restarted instance usually has a NEW address: the start
+// predicate reports the full freshly-observed resource (addresses re-read
+// from instances.get, never from pre-stop state) and callers must re-probe
+// readiness after every start. Identity labels, the instance name and
+// attached disks survive the cycle. StartEstimate is an honest ~45s hint
+// (typical GCE stopped->running latency).
 package gcp
 
 import (
@@ -150,6 +168,19 @@ func (g *GCP) Billing(kind provider.ResourceKind) provider.BillingPolicy {
 		return provider.BillingPolicy{MinimumDuration: time.Minute}
 	}
 	return provider.BillingPolicy{}
+}
+
+// Parking implements provider.ParkAware (docs/12): GCE instances stop and
+// resume, and a TERMINATED instance bills only its disks and static IPs —
+// the warm tier is economically real here. StartEstimate is the typical
+// GCE stopped->running latency (~45s) used for queue-wait estimation until
+// observed data exists. Kinds this driver does not serve get the zero
+// policy — the capability contract.
+func (g *GCP) Parking(kind provider.ResourceKind) provider.ParkPolicy {
+	if kind == compute.Kind {
+		return provider.ParkPolicy{Supported: true, StartEstimate: 45 * time.Second}
+	}
+	return provider.ParkPolicy{}
 }
 
 func (g *GCP) Descriptor() provider.Descriptor {
@@ -305,16 +336,26 @@ func (g *GCP) Get(ctx context.Context, ref provider.ExternalRef) (provider.Obser
 		return provider.ObservedResource{}, &provider.Error{Class: provider.ErrInvalid,
 			SideEffect: provider.EffectNone, Provider: g.instance, Message: "empty instance name"}
 	}
-	release, err := g.pacer.Acquire(ctx)
+	inst, err := g.getInstance(ctx, g.zoneOf(ref), ref.ID)
 	if err != nil {
 		return provider.ObservedResource{}, err
 	}
-	defer release()
-	inst, err := g.svc.Instances.Get(g.project, g.zoneOf(ref), ref.ID).Context(ctx).Do()
-	if err != nil {
-		return provider.ObservedResource{}, g.mapErr(err, provider.EffectNone)
-	}
 	return g.observe(ctx, inst), nil
+}
+
+// getInstance is the pacer-wrapped instances.get returning the raw native
+// object (404 => ErrNotFound/EffectNone).
+func (g *GCP) getInstance(ctx context.Context, zone, name string) (*gce.Instance, error) {
+	release, err := g.pacer.Acquire(ctx)
+	if err != nil {
+		return nil, g.preflight(err)
+	}
+	defer release()
+	inst, err := g.svc.Instances.Get(g.project, zone, name).Context(ctx).Do()
+	if err != nil {
+		return nil, g.mapErr(err, provider.EffectNone)
+	}
+	return inst, nil
 }
 
 func (g *GCP) Plan(_ context.Context, req provider.PlanRequest) (provider.Plan, error) {
@@ -350,13 +391,20 @@ type createParams struct {
 }
 
 // opData is OperationRef.Data (self-versioned; the driver tolerates nil by
-// degrading to instance-status observation).
+// degrading to instance-status observation — which for pre-parking records
+// means the create predicate). Kind is the OP-KIND DISCRIMINATOR selecting
+// the per-kind terminal predicate in ObserveOperation ("create" | "delete"
+// | "stop" | "start"); legacy records carry only the Delete flag, so "" +
+// Delete=false decodes as create and "" + Delete=true as delete. An
+// unrecognized Kind observes as OpUnknown — never a borrowed predicate's
+// false success.
 type opData struct {
 	V        int    `json:"v"`
-	Op       string `json:"op"` // zonal operation name
+	Kind     string `json:"kind,omitempty"` // op-kind discriminator (see above)
+	Op       string `json:"op"`             // zonal operation name ("" for an idempotent stop/start no-op: verify by instance state)
 	Zone     string `json:"zone"`
 	Instance string `json:"instance"`
-	Delete   bool   `json:"delete,omitempty"`
+	Delete   bool   `json:"delete,omitempty"` // legacy pre-Kind delete flag (still written for downgrade tolerance)
 }
 
 func (g *GCP) Apply(ctx context.Context, action provider.Action) (provider.OperationRef, error) {
@@ -365,6 +413,8 @@ func (g *GCP) Apply(ctx context.Context, action provider.Action) (provider.Opera
 		return g.applyCreate(ctx, action)
 	case "delete":
 		return g.applyDelete(ctx, action)
+	case "stop", "start":
+		return g.applyStopStart(ctx, action)
 	default:
 		return provider.OperationRef{}, &provider.Error{Class: provider.ErrInvalid,
 			SideEffect: provider.EffectNone, Provider: g.instance, Message: "unknown action kind " + action.Kind}
@@ -431,7 +481,7 @@ func (g *GCP) applyCreate(ctx context.Context, action provider.Action) (provider
 		// The request was sent: outcome uncertain unless proven otherwise.
 		return provider.OperationRef{}, g.mapErr(err, provider.EffectMaybe)
 	}
-	data, _ := json.Marshal(opData{V: 1, Op: op.Name, Zone: zone, Instance: p.Name})
+	data, _ := json.Marshal(opData{V: 1, Kind: "create", Op: op.Name, Zone: zone, Instance: p.Name})
 	return provider.OperationRef{
 		ActionID: action.ActionID,
 		Ref:      &provider.ExternalRef{ID: p.Name, Extra: map[string]string{"zone": zone}},
@@ -485,14 +535,132 @@ func (g *GCP) applyDelete(ctx context.Context, action provider.Action) (provider
 		}
 		return provider.OperationRef{}, mapped
 	}
-	data, _ := json.Marshal(opData{V: 1, Op: op.Name, Zone: zone, Instance: action.Ref.ID, Delete: true})
+	data, _ := json.Marshal(opData{V: 1, Kind: "delete", Op: op.Name, Zone: zone, Instance: action.Ref.ID, Delete: true})
 	return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}, nil
+}
+
+// applyStopStart implements the idempotent park actions (docs/12 §3). The
+// currently-observed instance status decides: a stop against an already
+// stopped/stopping instance — and a start against an already
+// running/starting one — succeeds WITHOUT a mutation, and its Data carries
+// no zonal operation, so ObserveOperation verifies by instance state alone.
+// A vanished instance is ErrNotFound (the engine fails the op; the
+// discovery sweep owns the orphan disposition, docs/12 §7). Identity is
+// never touched: stop/start mutate power state only — labels, name and
+// disks survive.
+func (g *GCP) applyStopStart(ctx context.Context, action provider.Action) (provider.OperationRef, error) {
+	if action.Ref == nil || action.Ref.ID == "" {
+		return provider.OperationRef{}, &provider.Error{Class: provider.ErrInvalid,
+			SideEffect: provider.EffectNone, Provider: g.instance, Message: action.Kind + " requires a ref"}
+	}
+	zone := g.zoneOf(*action.Ref)
+	inst, err := g.getInstance(ctx, zone, action.Ref.ID)
+	if err != nil {
+		return provider.OperationRef{}, err // incl. 404 => ErrNotFound
+	}
+	settled := stopSettled
+	if action.Kind == "start" {
+		settled = startSettled
+	}
+	if settled(inst.Status) {
+		// IDEMPOTENT (docs/12 §3): already there, or already on the way —
+		// a crash-duplicated dispatch is a no-op. No zonal operation exists
+		// for THIS dispatch, so Data records only the op kind and the
+		// per-kind predicate verifies directly against instance state.
+		data, _ := json.Marshal(opData{V: 1, Kind: action.Kind, Zone: zone, Instance: action.Ref.ID})
+		return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}, nil
+	}
+
+	release, err := g.pacer.Acquire(ctx)
+	if err != nil {
+		return provider.OperationRef{}, g.preflight(err)
+	}
+	var op *gce.Operation
+	if action.Kind == "stop" {
+		op, err = g.svc.Instances.Stop(g.project, zone, action.Ref.ID).Context(ctx).Do()
+	} else {
+		op, err = g.svc.Instances.Start(g.project, zone, action.Ref.ID).Context(ctx).Do()
+	}
+	release() // before any rescue re-read: never hold the concurrency slot across it
+	if err != nil {
+		// 404 => ErrNotFound (vanished between the read and the mutation).
+		// 400 => ErrInvalid/EffectNone via mapErr (e.g. stopping an instance
+		// with a local SSD without discardLocalSsd): a clean revert — the
+		// machine is untouched and the kernel falls back per docs/12 §3.
+		mapped := g.mapErr(err, provider.EffectMaybe)
+		// EXCEPT the idempotency race (docs/12 §3: success in EVERY state
+		// combination): the instance may have reached the op's target state
+		// between the dedup read and the mutating call, making GCE reject
+		// the now-redundant call. The engine turns ErrInvalid/ErrTerminal
+		// into a phase revert (retryable classes re-dispatch and re-run the
+		// dedup read, so they self-heal) — so for those two classes re-read
+		// once: settled => the idempotent no-op success. A genuine rejection
+		// (local SSD, unsupported instance) leaves the machine unmoved, so
+		// the re-read is not settled and the clean ErrInvalid revert stands.
+		if provider.IsClass(mapped, provider.ErrInvalid) || provider.IsClass(mapped, provider.ErrTerminal) {
+			if again, gerr := g.getInstance(ctx, zone, action.Ref.ID); gerr == nil && settled(again.Status) {
+				data, _ := json.Marshal(opData{V: 1, Kind: action.Kind, Zone: zone, Instance: action.Ref.ID})
+				return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}, nil
+			}
+		}
+		return provider.OperationRef{}, mapped
+	}
+	data, _ := json.Marshal(opData{V: 1, Kind: action.Kind, Op: op.Name, Zone: zone, Instance: action.Ref.ID})
+	return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}, nil
+}
+
+// stopSettled reports instance statuses where a stop is already complete or
+// in flight — Apply(stop) succeeds without a new mutation (docs/12 §3).
+// COHERENCE INVARIANT with stopComplete: every transitional status accepted
+// here converges to a stopComplete one (STOPPING/PENDING_STOP → TERMINATED,
+// SUSPENDING → SUSPENDED), so a no-op stop record can never poll forever.
+func stopSettled(s string) bool {
+	switch s {
+	case "STOPPING", "PENDING_STOP", "SUSPENDING":
+		return true
+	}
+	return stopComplete(s)
+}
+
+// stopComplete is the stop op's TERMINAL predicate: the settled power-off
+// statuses. TERMINATED is GCE's normal stopped state; STOPPED and SUSPENDED
+// are also settled non-billing-compute states another actor may have left
+// the machine in — a stop op observing one is done (a predicate accepting
+// only TERMINATED would poll forever there: the engine's attempt cap bounds
+// dispatch, not polling). Transitional statuses keep polling.
+func stopComplete(s string) bool {
+	switch s {
+	case "TERMINATED", "STOPPED", "SUSPENDED":
+		return true
+	}
+	return false
+}
+
+// startSettled reports instance statuses where a start is already complete
+// or in flight — Apply(start) succeeds without a new mutation.
+func startSettled(s string) bool {
+	switch s {
+	case "RUNNING", "STAGING", "PROVISIONING":
+		return true
+	}
+	return false
 }
 
 func (g *GCP) ObserveOperation(ctx context.Context, op provider.OperationRef) (provider.OperationStatus, error) {
 	var data opData
 	if len(op.Data) > 0 {
 		_ = json.Unmarshal(op.Data, &data)
+	}
+	kind := data.Kind
+	if kind == "" {
+		// Legacy decode (pre-parking records, and Data lost across a
+		// crash): only the Delete flag existed — everything else was a
+		// create. Stop/start records ALWAYS carry Kind by construction.
+		if data.Delete {
+			kind = "delete"
+		} else {
+			kind = "create"
+		}
 	}
 
 	// Poll the zonal operation by reference — never by listing (05 §10).
@@ -540,17 +708,43 @@ func (g *GCP) ObserveOperation(ctx context.Context, op provider.OperationRef) (p
 	obs, err := g.Get(ctx, *ref)
 	if err != nil {
 		// Incl. not_found — the engine interprets by op kind: a vanished
-		// create routes to verifying, a vanished delete is completion.
+		// create routes to verifying, a vanished delete is completion, and
+		// a machine that vanished mid-stop/start fails the op (docs/12 §7).
 		return provider.OperationStatus{}, err
 	}
-	if data.Delete {
+	// PER-KIND terminal predicate (docs/12): each op kind succeeds only on
+	// ITS target state — a stop is never "done" because the machine is
+	// running, and vice versa.
+	switch kind {
+	case "delete":
 		return provider.OperationStatus{State: provider.OpRunning, Ref: ref, RetryAfter: 2 * time.Second}, nil
-	}
-	switch obs.Phase {
-	case provider.PhaseRunning:
-		return provider.OperationStatus{State: provider.OpSucceeded, Ref: ref, Resource: &obs}, nil
+	case "create":
+		if obs.Phase == provider.PhaseRunning {
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: ref, Resource: &obs}, nil
+		}
+		return provider.OperationStatus{State: provider.OpRunning, Ref: ref, RetryAfter: 2 * time.Second}, nil
+	case "stop":
+		// Success only when OBSERVED in a settled power-off state (see
+		// stopComplete). Anything else — including a DONE zonal op with the
+		// instance still winding down — keeps polling.
+		if stopComplete(obs.ProviderState) {
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: ref, Resource: &obs}, nil
+		}
+		return provider.OperationStatus{State: provider.OpRunning, Ref: ref, RetryAfter: 2 * time.Second}, nil
+	case "start":
+		// Success only when OBSERVED running. The snapshot is the FRESH
+		// instances.get: GCE released the ephemeral external IP at stop, so
+		// the restarted instance's addresses are usually NEW — they must
+		// come from this observation, never from pre-stop state.
+		if obs.ProviderState == "RUNNING" {
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: ref, Resource: &obs}, nil
+		}
+		return provider.OperationStatus{State: provider.OpRunning, Ref: ref, RetryAfter: 2 * time.Second}, nil
 	default:
-		return provider.OperationStatus{State: provider.OpRunning, Ref: ref, RetryAfter: 2 * time.Second}, nil
+		// Unrecognized discriminator (a newer journal record than this
+		// binary understands): no predicate may be guessed — OpUnknown,
+		// never a false success.
+		return provider.OperationStatus{State: provider.OpUnknown, Ref: ref}, nil
 	}
 }
 

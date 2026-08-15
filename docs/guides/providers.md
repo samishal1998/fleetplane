@@ -119,6 +119,10 @@ plain idle-reclaim timing back, opt the kind out with `disabled: true` under
 `providers.<name>.billing`
 ([configuration → billing](configuration.md#billing-providersnamebilling)).
 
+No [parking](concepts.md#parked-machines-the-warm-tier): Hetzner bills
+powered-off servers at full price, so the driver declares no park capability
+and delete-and-recreate stays the optimal reclaim path.
+
 ### Identity labels
 
 Fleetplane stamps every server it creates with real Hetzner key=value labels,
@@ -259,6 +263,10 @@ immediately when the idle window elapses; opt out per kind with
 `disabled: true` under `providers.<name>.billing`
 ([configuration → billing](configuration.md#billing-providersnamebilling)).
 
+No [parking](concepts.md#parked-machines-the-warm-tier): DigitalOcean bills
+powered-off droplets at full price, so the driver declares no park capability
+and delete-and-recreate stays the optimal reclaim path.
+
 ### Identity labels become `fp-*` tags
 
 DigitalOcean has no key=value labels — only flat tags. The driver encodes
@@ -380,6 +388,25 @@ billed for the full minute. Override or disable per kind via
 `providers.<name>.billing`
 ([configuration → billing](configuration.md#billing-providersnamebilling)).
 
+### Parking
+
+The driver implements the optional `ParkAware` capability for
+`compute.machine` ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)):
+EBS-backed instances stop and resume, and a stopped instance bills only its
+EBS volumes and Elastic IPs. The declared `StartEstimate` is 30s — EC2
+starts typically land in tens of seconds.
+
+Two caveats the driver surfaces rather than hides:
+
+- **Spot and instance-store-backed instances cannot stop.** EC2 rejects the
+  call with `UnsupportedOperation`, which the driver maps to an `invalid`
+  error — the kernel cleanly reverts `parking → ready` and falls back to
+  delete/create semantics for that machine.
+- **The public IP changes.** EC2 releases the ephemeral public IPv4 at stop
+  and usually assigns a new one at start (only Elastic IPs are stable), so
+  Fleetplane re-observes addresses and re-runs the readiness probe after
+  every start — never reuse pre-stop addresses.
+
 ### Identity labels
 
 AWS tag keys permit dots and slashes, so the `fleetplane.io/*` identity
@@ -487,6 +514,25 @@ The driver declares GCE's per-second billing with a **60-second minimum** for
 driver. No billing-boundary window scheduling results; override or disable
 per kind via `providers.<name>.billing`
 ([configuration → billing](configuration.md#billing-providersnamebilling)).
+
+### Parking
+
+The driver implements the optional `ParkAware` capability for
+`compute.machine` ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)):
+GCE instances stop and resume, and a `TERMINATED` (stopped) instance incurs
+no compute charge — only its disks and static IPs keep billing, so the warm
+tier is economically real here. The declared `StartEstimate` is 45s, the
+typical GCE stopped→running latency.
+
+Two caveats the driver surfaces rather than hides:
+
+- **The public IP changes.** GCE releases the ephemeral external IP at stop,
+  so a restarted instance usually has a **new address** — Fleetplane
+  re-reads addresses and re-runs the readiness probe after every start.
+- **Local SSDs block a plain stop.** GCE rejects stopping an instance with a
+  local SSD (without `discardLocalSsd`) with a 400; the driver maps it to an
+  `invalid` error, the machine is untouched, and the kernel cleanly reverts
+  `parking → ready` — delete/create semantics apply to that machine instead.
 
 ### Identity labels become `fp-*` labels
 
@@ -631,6 +677,51 @@ way — the driver states them, the kernel's lifecycle policy decides what to
 do with them ([design doc 11 §20](../11_COST_AWARE_LEASING.md)) — and
 operators can override or disable them per instance and kind
 ([configuration → billing](configuration.md#billing-providersnamebilling)).
+
+### Optional capability: parking
+
+A driver whose cloud bills stopped machines at a fraction of the running
+price can expose stop/resume — the input to
+[parked machines](concepts.md#parked-machines-the-warm-tier)
+([design doc 12](../12_PARKED_MACHINES.md)) — by implementing the optional
+`provider.ParkAware` interface
+([`pkg/sdk/provider/parking.go`](https://github.com/samishal1998/fleetplane/blob/main/pkg/sdk/provider/parking.go)),
+discovered by type assertion like `BillingAware`:
+
+```go
+type ParkAware interface {
+    Parking(kind ResourceKind) ParkPolicy
+}
+
+type ParkPolicy struct {
+    Supported     bool
+    StartEstimate time.Duration // typical stopped->running latency hint
+}
+```
+
+The zero `ParkPolicy` means "cannot park" — a provider that cannot park
+never sees a stop action (the capability gate lives inside the journaling
+transaction, not the caller) — and `Parking` **must** return the zero
+policy for kinds the driver does not serve. A driver that declares support
+also accepts two new `Action.Kind` values, `"stop"` and `"start"`, under a
+hard contract:
+
+- **Both are idempotent.** Stopping a stopped machine and starting a
+  running machine return success — in *every* state combination. This is
+  what makes crash recovery trivial: stop/start ops retry by plain
+  re-dispatch, and a crash-duplicated dispatch is a harmless no-op.
+- **Stop preserves identity.** Labels/tags, the external ID, and disks
+  survive the cycle; ownership parsing (`FleetplaneID`, `CreateOpID`,
+  `Owned`) must round-trip unchanged.
+- **Report honest phases** while transitioning (`stopping` → `stopped`,
+  `starting` → `running`), and surface hard rejections (a machine type that
+  cannot stop) as `invalid` — the kernel reverts the phase and falls back to
+  delete/create for that machine.
+
+Two conformance subtests enforce this: `Parking/CapabilityContract` (stable,
+non-negative policy; zero policy for undeclared kinds) and
+`Parking/StopStartLifecycle` (full stop → start round trip, stop-of-stopped
+and start-of-running succeed, identity survives).
 
 ### The ActionID dedup rule
 
@@ -812,6 +903,8 @@ The subtest names are the contract:
 | `Operations/PollingReachesTerminal` | `ObserveOperation` reaches a terminal state |
 | `Pagination/OverOnePage` | Multi-page discovery loses nothing (`Expensive` only) |
 | `Billing/CapabilityContract` | Optional `BillingAware`: fields non-negative, answers deterministic, undeclared kinds fine-grained (skipped when not implemented) |
+| `Parking/CapabilityContract` | Optional `ParkAware`: stable policy, non-negative `StartEstimate`, zero policy for undeclared kinds (skipped when not implemented) |
+| `Parking/StopStartLifecycle` | Stop → start round trip; stop-of-stopped and start-of-running succeed; identity survives the cycle (skipped when parking unsupported) |
 
 The fake provider passes the whole catalog under its most hostile deterministic
 settings — multi-step async creates and deletes, list lag, forced pagination —

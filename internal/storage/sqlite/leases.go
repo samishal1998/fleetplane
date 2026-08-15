@@ -193,6 +193,12 @@ func (as acquisitionStore) SetPendingResource(ctx context.Context, id storage.Ac
 	return nil
 }
 
+func (as acquisitionStore) ClearPendingResource(ctx context.Context, id storage.AcquisitionID) error {
+	_, err := as.q.ExecContext(ctx,
+		`UPDATE acquisitions SET pending_resource_id=NULL WHERE id=?`, string(id))
+	return mapErr(err)
+}
+
 func (as acquisitionStore) ListByState(ctx context.Context, states ...storage.AcqState) ([]*storage.Acquisition, error) {
 	if len(states) == 0 {
 		return nil, nil

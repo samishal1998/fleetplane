@@ -322,6 +322,10 @@ deterministic asynchrony:
 | `deleteSteps` | int | `0` | Observe calls until a delete lands gone. |
 | `listLagSteps` | int | `0` | Discover calls before a new object becomes listable. |
 | `pageSize` | int | `0` | Internal Discover pagination chunk (`0` = single page). |
+| `park` | bool | `false` | Declares the park capability for `compute.machine` — the test control for [parked machines](concepts.md#parked-machines-the-warm-tier). |
+| `stopSteps` | int | `0` | Observe calls until a stop lands `stopped`. |
+| `startSteps` | int | `0` | Observe calls until a start lands `running`. |
+| `startEstimate` | duration | `0` | The `StartEstimate` hint the driver's park policy declares (feeds queue-wait estimates until observed data exists). |
 
 ```yaml
 providers:
@@ -398,6 +402,8 @@ Classes are reusable creation templates (see the design docs,
 | `classes.<name>.provider` | string | **required** | Name of a configured provider instance. Referencing an unknown provider is a boot error. |
 | `classes.<name>.spec` | map | — | Kind-specific spec (below). Provider-specific extra fields are allowed and passed through to the driver. |
 | `classes.<name>.reclaim.idleAfter` | duration | — | Poolless idle reclamation (below). Absent = never auto-reclaimed. |
+| `classes.<name>.reclaim.park` | string | `auto` | Stage-1 disposition on park-capable providers (below): `auto` (unset/empty means the same) parks the idle machine instead of deleting; `never` keeps the delete. Any other value is a boot error. |
+| `classes.<name>.reclaim.deleteAfter` | duration | — | Stage 2: delete machines parked this long (below). Absent/`0` = parked forever. Poolless classes only — pool specs reject it. |
 | `classes.<name>.scheduling.queue.maxWait` | duration | — | Queue budget for acquisitions of this class (below). Absent/`0` = provision immediately. |
 
 ### `compute.machine` spec
@@ -492,6 +498,52 @@ classes:
       image: "snapshot:ci-runner=v12"
     reclaim:
       idleAfter: 5m
+```
+
+### `reclaim.park` and `reclaim.deleteAfter` (two-stage reclaim)
+
+On providers that can stop and resume machines, reclaim is two-stage
+([concepts → parked machines](concepts.md#parked-machines-the-warm-tier),
+[design doc 12](../12_PARKED_MACHINES.md)):
+
+- **Stage 1** at `idleAfter`: if the provider is park-capable and `park` is
+  not `never`, the idle machine is **parked** (a journaled stop — it drops to
+  the storage-price tier and stays restartable in seconds) instead of
+  deleted. On providers without the capability, or with `park: never`,
+  behavior is exactly the plain delete above.
+- **Stage 2** at `deleteAfter`, measured from when the machine entered
+  `parked`: a machine parked that long is deleted. Unset keeps parked
+  machines indefinitely — they are cheap, and the fleet keeps its warm tier.
+
+Park capability is per driver and per kind: `gcp` and `aws` declare it for
+`compute.machine` (stopped instances bill only disks/volumes and static
+IPs); `hetzner` and `digitalocean` do **not** — those clouds bill powered-off
+machines at full price, so delete-and-recreate stays optimal there and a
+`park` policy is a no-op. The `fake` driver opts in via its `park` setting
+([above](#driver-fake)). See the [providers guide](providers.md) for the
+per-driver caveats.
+
+`deleteAfter` is **poolless-only**: pool fleet size is owned by `replicas`
+convergence, so a pool spec carrying `reclaim.deleteAfter` is rejected
+(`400 invalid`). Pools opt into the warm tier through `spec.minRunning`
+instead — keep at least that many machines hot, parking idle ones above the
+floor and starting parked ones before creating when below it; `minRunning`
+must be between 0 and `replicas`, and unset means no parking (today's
+behavior). Pool specs are API objects, not config-file keys — see
+[concepts → parked machines](concepts.md#parked-machines-the-warm-tier).
+
+```yaml
+classes:
+  ci-large:
+    kind: compute.machine
+    provider: gcp-main
+    spec:
+      serverType: e2-medium
+      image: "family:debian-cloud/debian-12"
+    reclaim:
+      idleAfter: 10m     # stage 1: idle 10m -> parked (gcp is park-capable)
+      park: auto         # default; "never" restores plain delete
+      deleteAfter: 4h    # stage 2: parked 4h -> deleted; unset = parked forever
 ```
 
 ### `scheduling.queue.maxWait`
@@ -752,9 +804,11 @@ auth:
   [API & resource model](../04_API_AND_RESOURCE_MODEL.md) (classes, kinds),
   [reconciliation & scheduling](../05_RECONCILIATION_AND_SCHEDULING.md)
   (pools, discovery),
-  [cost-aware leasing](../11_COST_AWARE_LEASING.md) (billing windows, queueing)
+  [cost-aware leasing](../11_COST_AWARE_LEASING.md) (billing windows, queueing),
+  [parked machines](../12_PARKED_MACHINES.md) (the stop/resume warm tier)
 - ADRs: [ADR-007 config & secrets](../adr/ADR-007-config.md),
   [ADR-008 tokens](../adr/ADR-008-tokens.md),
   [ADR-014 retries](../adr/ADR-014-retries.md),
   [ADR-017 operation states, ghosts & orphans](../adr/ADR-017-operation-states.md),
-  [ADR-018 cost-aware leasing](../adr/ADR-018-cost-aware-leasing.md)
+  [ADR-018 cost-aware leasing](../adr/ADR-018-cost-aware-leasing.md),
+  [ADR-019 parked machines](../adr/ADR-019-parked-machines.md)

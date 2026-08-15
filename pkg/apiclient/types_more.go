@@ -103,6 +103,10 @@ type ClassSpec struct {
 
 type ClassReclaim struct {
 	IdleAfter string `json:"idleAfter,omitempty"` // Go duration, e.g. "5m"
+	// Park: "auto" (default) parks on capable providers; "never" deletes.
+	Park string `json:"park,omitempty"`
+	// DeleteAfter: delete machines parked this long (poolless classes).
+	DeleteAfter string `json:"deleteAfter,omitempty"`
 }
 
 type ClassScheduling struct {

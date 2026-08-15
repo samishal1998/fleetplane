@@ -79,12 +79,19 @@ func TestGCPLabelCodecSanitize(t *testing.T) {
 type gceMock struct {
 	mux          *http.ServeMux
 	insertCalls  atomic.Int64
+	stopCalls    atomic.Int64
+	startCalls   atomic.Int64
 	lastInsert   atomic.Value // string: request body
 	lastFilter   atomic.Value // string: instances list filter
 	lastListPath atomic.Value // string: URL path of the last instances list
 	listStatus   atomic.Value // string: status the listed instance reports
+	instStatus   atomic.Value // string: status instances.get reports for ci-1
+	natIP        atomic.Value // string: ci-1's ephemeral external IP
 	instanceGone atomic.Bool
 	get429       atomic.Bool
+	stop400      atomic.Bool  // stop rejects 400 (local SSD without discardLocalSsd)
+	start400     atomic.Bool  // start rejects 400
+	raceTo       atomic.Value // string: status instances.get reports AFTER a 400-rejected stop/start (idempotency race)
 	opStatus     atomic.Value // string: zonal operation status
 	opError      atomic.Bool
 }
@@ -96,14 +103,14 @@ func gceErr(w http.ResponseWriter, code int, reason, msg string) {
 		code, msg, reason, msg)
 }
 
-func instanceJSON(status string) string {
+func instanceJSON(status, natIP string) string {
 	return fmt.Sprintf(`{
 		"name":"ci-1","status":%q,
 		"zone":"https://compute.googleapis.com/compute/v1/projects/test-proj/zones/us-central1-a",
 		"machineType":"https://compute.googleapis.com/compute/v1/projects/test-proj/zones/us-central1-a/machineTypes/e2-medium",
 		"labels":{"fp-managed":"true","fp-owner":"own_01owner","fp-id":"res_01abc","fp-op":"op_01taken"},
-		"networkInterfaces":[{"networkIP":"10.0.0.2","accessConfigs":[{"type":"ONE_TO_ONE_NAT","natIP":"203.0.113.5"}]}],
-		"creationTimestamp":"2026-08-13T00:00:00Z"}`, status)
+		"networkInterfaces":[{"networkIP":"10.0.0.2","accessConfigs":[{"type":"ONE_TO_ONE_NAT","natIP":%q}]}],
+		"creationTimestamp":"2026-08-13T00:00:00Z"}`, status, natIP)
 }
 
 func newGCEMock(t *testing.T) (*gceMock, *GCP) {
@@ -111,6 +118,8 @@ func newGCEMock(t *testing.T) (*gceMock, *GCP) {
 	m := &gceMock{mux: http.NewServeMux()}
 	m.opStatus.Store("DONE")
 	m.listStatus.Store("RUNNING")
+	m.instStatus.Store("RUNNING")
+	m.natIP.Store("203.0.113.5")
 	ts := httptest.NewServer(m.mux)
 	t.Cleanup(ts.Close)
 
@@ -136,7 +145,7 @@ func newGCEMock(t *testing.T) (*gceMock, *GCP) {
 			fmt.Fprintf(w, wrap, "")
 			return
 		}
-		fmt.Fprintf(w, wrap, instanceJSON(m.listStatus.Load().(string)))
+		fmt.Fprintf(w, wrap, instanceJSON(m.listStatus.Load().(string), "203.0.113.5"))
 	}
 	m.mux.HandleFunc("GET "+zonal+"/instances", func(w http.ResponseWriter, r *http.Request) {
 		listInstances(w, r, `{"items":[%s]}`)
@@ -154,7 +163,41 @@ func newGCEMock(t *testing.T) (*gceMock, *GCP) {
 			gceErr(w, http.StatusNotFound, "notFound", "instance ci-1 was not found")
 			return
 		}
-		fmt.Fprint(w, instanceJSON("RUNNING"))
+		fmt.Fprint(w, instanceJSON(m.instStatus.Load().(string), m.natIP.Load().(string)))
+	})
+	m.mux.HandleFunc("POST "+zonal+"/instances/ci-1/stop", func(w http.ResponseWriter, r *http.Request) {
+		if m.instanceGone.Load() {
+			gceErr(w, http.StatusNotFound, "notFound", "instance ci-1 was not found")
+			return
+		}
+		if m.stop400.Load() {
+			if to, _ := m.raceTo.Load().(string); to != "" {
+				m.instStatus.Store(to) // the race: another actor already moved it
+			}
+			gceErr(w, http.StatusBadRequest, "badRequest",
+				"Stopping a VM with a Local SSD attached requires setting discardLocalSsd")
+			return
+		}
+		m.stopCalls.Add(1)
+		m.instStatus.Store("STOPPING")
+		fmt.Fprint(w, `{"name":"op-stop-1","status":"RUNNING","operationType":"stop"}`)
+	})
+	m.mux.HandleFunc("POST "+zonal+"/instances/ci-1/start", func(w http.ResponseWriter, r *http.Request) {
+		if m.instanceGone.Load() {
+			gceErr(w, http.StatusNotFound, "notFound", "instance ci-1 was not found")
+			return
+		}
+		if m.start400.Load() {
+			if to, _ := m.raceTo.Load().(string); to != "" {
+				m.instStatus.Store(to)
+			}
+			gceErr(w, http.StatusBadRequest, "badRequest", "Instance ci-1 is not in TERMINATED state")
+			return
+		}
+		m.startCalls.Add(1)
+		m.instStatus.Store("STAGING")
+		m.natIP.Store("203.0.113.99") // GCE hands out a NEW ephemeral IP on start
+		fmt.Fprint(w, `{"name":"op-start-1","status":"RUNNING","operationType":"start"}`)
 	})
 	m.mux.HandleFunc("DELETE "+zonal+"/instances/ci-1", func(w http.ResponseWriter, r *http.Request) {
 		if m.instanceGone.Load() {
@@ -171,6 +214,12 @@ func newGCEMock(t *testing.T) (*gceMock, *GCP) {
 			return
 		}
 		fmt.Fprintf(w, `{"name":"op-ins-1","status":%q,"operationType":"insert"}`, m.opStatus.Load())
+	})
+	m.mux.HandleFunc("GET "+zonal+"/operations/op-stop-1", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"name":"op-stop-1","status":%q,"operationType":"stop"}`, m.opStatus.Load())
+	})
+	m.mux.HandleFunc("GET "+zonal+"/operations/op-start-1", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"name":"op-start-1","status":%q,"operationType":"start"}`, m.opStatus.Load())
 	})
 	m.mux.HandleFunc("GET "+zonal+"/machineTypes/e2-medium", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"name":"e2-medium","guestCpus":2,"memoryMb":4096}`)

@@ -65,6 +65,13 @@ type QueuePolicy struct {
 
 type ClassReclaim struct {
 	IdleAfter Duration `yaml:"idleAfter"`
+	// Park: "auto" (default; "" canonicalizes to auto) parks idle machines
+	// on park-capable providers instead of deleting; "never" keeps the
+	// delete (docs/12 §5).
+	Park string `yaml:"park"`
+	// DeleteAfter deletes machines parked this long (stage 2; poolless
+	// classes only). Zero/unset = parked forever.
+	DeleteAfter Duration `yaml:"deleteAfter"`
 }
 
 // Reconcile tunes the pool reconciler.
@@ -216,6 +223,14 @@ func (c *Config) validate() error {
 		}
 		if _, ok := c.Providers[cls.Provider]; !ok {
 			return fmt.Errorf("classes.%s references unknown provider %q", name, cls.Provider)
+		}
+		if cls.Reclaim != nil {
+			if p := cls.Reclaim.Park; p != "" && p != "auto" && p != "never" {
+				return fmt.Errorf("classes.%s.reclaim.park must be auto or never, got %q", name, p)
+			}
+			if cls.Reclaim.DeleteAfter < 0 || cls.Reclaim.IdleAfter < 0 {
+				return fmt.Errorf("classes.%s.reclaim durations must be >= 0", name)
+			}
 		}
 		if cls.Scheduling != nil && cls.Scheduling.Queue != nil {
 			mw := cls.Scheduling.Queue.MaxWait

@@ -22,6 +22,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/samishal1998/fleetplane/internal/metrics"
 	"github.com/samishal1998/fleetplane/internal/phase"
 	"github.com/samishal1998/fleetplane/internal/storage"
 	"github.com/samishal1998/fleetplane/pkg/kinds/compute"
@@ -187,10 +188,25 @@ func (e *Engine) drive(ctx context.Context, op *storage.Operation) {
 
 // --- dispatch: TxB → Apply → TxC ---
 
+// isParkOp: stop/start are idempotent mutations (docs/12 §7) — they retry
+// by plain re-dispatch and never enter the create verification machinery.
+func isParkOp(kind storage.OpKind) bool {
+	return kind == storage.OpKindStop || kind == storage.OpKindStart
+}
+
+// maxParkOpAttempts bounds stop/start re-dispatch: past it the op fails and
+// the phase reverts, so a permanently-retryable provider error can never
+// wedge a machine in parking/starting (design verification finding).
+const maxParkOpAttempts = 8
+
 func (e *Engine) dispatch(ctx context.Context, op *storage.Operation) error {
 	driver, action, err := e.driverAndAction(ctx, op)
 	if err != nil {
 		return e.failOp(ctx, op.ID, op.State, err)
+	}
+	if isParkOp(op.Kind) && op.Attempt >= maxParkOpAttempts {
+		return e.failOp(ctx, op.ID, op.State,
+			fmt.Errorf("giving up after %d attempts", op.Attempt))
 	}
 
 	nowMs := e.clock.Now().UnixMilli()
@@ -257,6 +273,23 @@ func (e *Engine) handleApplyError(ctx context.Context, op *storage.Operation, ap
 	if op.Kind == storage.OpKindDelete && class == provider.ErrNotFound {
 		return e.succeedDelete(ctx, op, storage.OpInFlight)
 	}
+	// A machine that vanished mid-stop/start fails the op (phase reverts);
+	// the discovery sweep owns the orphan disposition (docs/12 §7).
+	if isParkOp(op.Kind) && class == provider.ErrNotFound {
+		return e.failOp(ctx, op.ID, storage.OpInFlight, applyErr)
+	}
+	// Idempotent stop/start: EffectMaybe is safe to re-dispatch directly —
+	// never the create verification path (docs/12 §7; bounded at dispatch).
+	if isParkOp(op.Kind) && class != provider.ErrInvalid && class != provider.ErrTerminal {
+		delay := e.backoff(op.Attempt, applyErr)
+		next := nowMs + delay.Milliseconds()
+		return e.st.Tx(ctx, func(tx storage.TxStore) error {
+			return tx.Operations().Transition(ctx, op.ID, storage.OpInFlight, storage.OpJournaled, func(o *storage.Operation) {
+				o.NextAttemptAt = &next
+				setErr(o, class, applyErr)
+			})
+		})
+	}
 
 	switch {
 	case class == provider.ErrInvalid || class == provider.ErrTerminal:
@@ -301,6 +334,10 @@ func (e *Engine) poll(ctx context.Context, op *storage.Operation) error {
 			if op.Kind == storage.OpKindDelete {
 				return e.succeedDelete(ctx, op, storage.OpExternalAccepted)
 			}
+			if isParkOp(op.Kind) {
+				// Vanished mid-stop/start: fail + revert (docs/12 §7).
+				return e.failOp(ctx, op.ID, storage.OpExternalAccepted, obsErr)
+			}
 			// A create whose object vanished mid-poll: resolve via the
 			// verification procedure — never blind-succeed or blind-retry.
 			return e.st.Tx(ctx, func(tx storage.TxStore) error {
@@ -317,13 +354,27 @@ func (e *Engine) poll(ctx context.Context, op *storage.Operation) error {
 		if op.Kind == storage.OpKindDelete {
 			return e.succeedDelete(ctx, op, storage.OpExternalAccepted)
 		}
+		if op.Kind == storage.OpKindStop {
+			return e.succeedStop(ctx, op, status)
+		}
 		// Workload readiness gate (plan R16, 08 §4): provider success
 		// alone doesn't make a machine ready when a probe is declared.
+		// Starts re-probe too — the address may have changed (docs/12 §3).
 		switch ready, gateErr := e.readinessGate(ctx, op, status); {
 		case gateErr != nil:
+			if op.Kind == storage.OpKindStart {
+				// The provider START SUCCEEDED but the machine is unhealthy:
+				// it is RUNNING (full price), so reverting to parked would
+				// record a price tier the machine is not in. starting→failed
+				// hands it to the failed-cleanup delete (design blocker fix).
+				return e.failOpPhases(ctx, op.ID, storage.OpExternalAccepted, gateErr, phase.Starting, phase.Failed)
+			}
 			return e.failOp(ctx, op.ID, storage.OpExternalAccepted, gateErr)
 		case !ready:
 			return e.reschedule(ctx, op, nil)
+		}
+		if op.Kind == storage.OpKindStart {
+			return e.succeedStart(ctx, op, status)
 		}
 		return e.succeedCreate(ctx, op, status)
 	case provider.OpFailed:
@@ -397,6 +448,79 @@ func (e *Engine) succeedDelete(ctx context.Context, op *storage.Operation, from 
 	return nil
 }
 
+// succeedStop commits a confirmed stop: op terminal + parking→parked (the
+// CAS stamps parked_at) + observed snapshot (docs/12).
+func (e *Engine) succeedStop(ctx context.Context, op *storage.Operation, status provider.OperationStatus) error {
+	nowMs := e.clock.Now().UnixMilli()
+	err := e.st.Tx(ctx, func(tx storage.TxStore) error {
+		if err := tx.Operations().Transition(ctx, op.ID, op.State, storage.OpSucceeded, nil); err != nil {
+			return err
+		}
+		if op.ResourceID != nil {
+			if status.Resource != nil {
+				raw, _ := json.Marshal(status.Resource)
+				_ = tx.Resources().PutObserved(ctx, &storage.ObservedSnapshot{
+					ResourceID: *op.ResourceID, ObservedAt: nowMs,
+					ProviderPhase: string(status.Resource.Phase), Raw: raw,
+				})
+			}
+			if err := tx.Resources().CASPhase(ctx, *op.ResourceID, phase.Parking, phase.Parked, nowMs); err != nil {
+				return err
+			}
+		}
+		return tx.Events().Append(ctx, &storage.Event{
+			TS: nowMs, Type: "operation.succeeded", OperationID: &op.ID,
+			ResourceID: op.ResourceID, Provider: op.Provider, Outcome: "succeeded",
+		})
+	})
+	if err != nil {
+		return err
+	}
+	metrics.ResourceParkTotal.WithLabelValues(string(op.Provider)).Inc()
+	e.notifyTerminal(ctx, op.ID)
+	return nil
+}
+
+// succeedStart commits a confirmed start: op terminal + refreshed provider
+// facts (the IP may have changed — docs/12 §3) + starting→ready (the CAS
+// clears parked_at and stamps a fresh ready_at/idle clock).
+func (e *Engine) succeedStart(ctx context.Context, op *storage.Operation, status provider.OperationStatus) error {
+	nowMs := e.clock.Now().UnixMilli()
+	err := e.st.Tx(ctx, func(tx storage.TxStore) error {
+		if err := tx.Operations().Transition(ctx, op.ID, op.State, storage.OpSucceeded, nil); err != nil {
+			return err
+		}
+		if op.ResourceID != nil {
+			if status.Resource != nil {
+				raw, _ := json.Marshal(status.Resource)
+				_ = tx.Resources().PutObserved(ctx, &storage.ObservedSnapshot{
+					ResourceID: *op.ResourceID, ObservedAt: nowMs,
+					ProviderPhase: string(status.Resource.Phase), Raw: raw,
+				})
+				capJSON, _ := json.Marshal(status.Resource.Capacity)
+				if err := tx.Resources().SetProviderFacts(ctx, *op.ResourceID,
+					status.Resource.Extensions, capJSON, nowMs); err != nil {
+					return err
+				}
+			}
+			if err := tx.Resources().CASPhase(ctx, *op.ResourceID, phase.Starting, phase.Ready, nowMs); err != nil {
+				return err
+			}
+		}
+		return tx.Events().Append(ctx, &storage.Event{
+			TS: nowMs, Type: "operation.succeeded", OperationID: &op.ID,
+			ResourceID: op.ResourceID, Provider: op.Provider, Outcome: "succeeded",
+		})
+	})
+	if err != nil {
+		return err
+	}
+	metrics.ResourceStartTotal.WithLabelValues(string(op.Provider)).Inc()
+	metrics.StartSeconds.WithLabelValues(string(op.Provider)).Observe(float64(nowMs-op.CreatedAt) / 1000)
+	e.notifyTerminal(ctx, op.ID)
+	return nil
+}
+
 // readinessGate runs one TCP probe attempt per poll cycle when the machine
 // spec declares readiness (plan R16). Budget exhaustion (measured from the
 // operation's creation) fails the resource.
@@ -438,6 +562,18 @@ func (e *Engine) verify(ctx context.Context, op *storage.Operation) error {
 		return e.failOp(ctx, op.ID, op.State, err)
 	}
 	nowMs := e.clock.Now().UnixMilli()
+
+	if isParkOp(op.Kind) {
+		// Idempotent stop/start never needs discovery-based verification:
+		// verifying → journaled re-dispatch (bounded at dispatch). This
+		// also makes state-based Resume routing correct with no changes.
+		_ = driver
+		return e.st.Tx(ctx, func(tx storage.TxStore) error {
+			return tx.Operations().Transition(ctx, op.ID, storage.OpVerifying, storage.OpJournaled, func(o *storage.Operation) {
+				o.NextAttemptAt = nil
+			})
+		})
+	}
 
 	if op.Kind == storage.OpKindDelete {
 		// Deletes verify via Get: absent ⇒ succeeded; present ⇒ retry.
@@ -544,6 +680,28 @@ func (e *Engine) descriptor(op *storage.Operation) provider.Descriptor {
 }
 
 func (e *Engine) failOp(ctx context.Context, id storage.OperationID, from storage.OpState, cause error) error {
+	op, err := e.st.Operations().Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Per-kind phase disposition: creates/deletes fail the resource; the
+	// idempotent park ops REVERT it (docs/12 §4) — a failed stop leaves a
+	// running machine (→ready), a failed start a stopped one (→parked,
+	// which re-stamps parked_at so stage-2 never deletes a machine that
+	// just demonstrated demand).
+	fromPhase, toPhase := phase.Provisioning, phase.Failed
+	switch op.Kind {
+	case storage.OpKindDelete:
+		fromPhase = phase.Deleting
+	case storage.OpKindStop:
+		fromPhase, toPhase = phase.Parking, phase.Ready
+	case storage.OpKindStart:
+		fromPhase, toPhase = phase.Starting, phase.Parked
+	}
+	return e.failOpPhases(ctx, id, from, cause, fromPhase, toPhase)
+}
+
+func (e *Engine) failOpPhases(ctx context.Context, id storage.OperationID, from storage.OpState, cause error, resFrom, resTo phase.Phase) error {
 	nowMs := e.clock.Now().UnixMilli()
 	op, err := e.st.Operations().Get(ctx, id)
 	if err != nil {
@@ -556,11 +714,7 @@ func (e *Engine) failOp(ctx context.Context, id storage.OperationID, from storag
 			return err
 		}
 		if op.ResourceID != nil {
-			fromPhase := phase.Provisioning
-			if op.Kind == storage.OpKindDelete {
-				fromPhase = phase.Deleting
-			}
-			if err := tx.Resources().CASPhase(ctx, *op.ResourceID, fromPhase, phase.Failed, nowMs); err != nil {
+			if err := tx.Resources().CASPhase(ctx, *op.ResourceID, resFrom, resTo, nowMs); err != nil {
 				// The resource may legitimately be elsewhere; the phase
 				// mapper reconciles later. Never block the journal on it.
 				e.log.Warn("failed op: phase not updated", "operation_id", id, "error", err)

@@ -151,3 +151,13 @@ func (c *Client) ListClasses(ctx context.Context) ([]Class, error) {
 func (c *Client) DeleteClass(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/classes/"+url.PathEscape(name), nil, "", nil)
 }
+
+// --- parked machines (docs/12) ---
+
+func (c *Client) ParkResource(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/resources/"+url.PathEscape(id)+":park", nil, "", nil)
+}
+
+func (c *Client) StartResource(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/resources/"+url.PathEscape(id)+":start", nil, "", nil)
+}

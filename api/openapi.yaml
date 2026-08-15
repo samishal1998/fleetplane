@@ -83,6 +83,24 @@ paths:
       responses:
         "202": { description: Draining }
         default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:park:
+    post:
+      operationId: parkResource
+      summary: Stop a ready machine into the parked tier (docs/12; 202 journaled, 200 idempotent no-op, 409 unsupported/conflict)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: Parking journaled, content: { application/json: { schema: { type: object } } } }
+        "200": { description: Already parking/parked, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:start:
+    post:
+      operationId: startResource
+      summary: Start a parked machine back into service (202 journaled, 200 idempotent no-op)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "202": { description: Start journaled, content: { application/json: { schema: { type: object } } } }
+        "200": { description: Already starting/running, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/classes:
     post:
       operationId: createClass
@@ -282,7 +300,7 @@ components:
         status:
           type: object
           properties:
-            phase: { type: string, enum: [unknown, provisioning, ready, allocated, draining, deleting, failed, orphaned] }
+            phase: { type: string, enum: [unknown, provisioning, ready, allocated, draining, deleting, failed, orphaned, parking, parked, starting] }
             externalId: { type: string }
             externalRef: { type: object }
             capacity: { type: object }
@@ -365,7 +383,10 @@ components:
         template: { type: object, description: "kind-specific spec, validated at write time" }
         reclaim:
           type: object
-          properties: { idleAfter: { type: string, example: "5m" } }
+          properties:
+            idleAfter: { type: string, example: "5m" }
+            park: { type: string, enum: [auto, never], description: "stage-1 disposition on park-capable providers (docs/12)" }
+            deleteAfter: { type: string, example: "4h", description: "delete machines parked this long (poolless classes only)" }
         scheduling:
           type: object
           properties:

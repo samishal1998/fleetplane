@@ -64,6 +64,9 @@ type OpKind string
 const (
 	OpKindCreate OpKind = "resource.create"
 	OpKindDelete OpKind = "resource.delete"
+	// docs/12: idempotent stop/start mutations (the parked warm tier).
+	OpKindStop  OpKind = "resource.stop"
+	OpKindStart OpKind = "resource.start"
 )
 
 // LeaseState: reservations insert active directly (plan R5 — no "reserved").
@@ -118,6 +121,7 @@ type Resource struct {
 	ReadyAt          *int64
 	LastLeaseEndedAt *int64
 	DrainStartedAt   *int64
+	ParkedAt         *int64 // docs/12: set at parking->parked, cleared at ->ready
 
 	CreatedAt int64
 	UpdatedAt int64
@@ -226,7 +230,11 @@ type ClassRecord struct {
 	Spec     json.RawMessage
 
 	ReclaimIdleAfterMs *int64
-	QueueMaxWaitMs     *int64
+	// ReclaimPark: "" or "auto" parks on capable providers; "never" keeps
+	// stage-1 deletes (docs/12 §5). Canonicalize "" == auto everywhere.
+	ReclaimPark          string
+	ReclaimDeleteAfterMs *int64
+	QueueMaxWaitMs       *int64
 
 	Source    string // "config" | "api"
 	CreatedAt int64

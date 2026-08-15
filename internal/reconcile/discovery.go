@@ -195,9 +195,15 @@ func (r *Reconciler) refreshObserved(ctx context.Context, res *storage.Resource,
 		if err := tx.Resources().SetProviderFacts(ctx, res.ID, obs.Extensions, capJSON, nowMs); err != nil {
 			return err
 		}
-		// A re-observed orphan is alive again (05 §7).
+		// A re-observed orphan is alive again (05 §7). A formerly-parked
+		// machine that reappears STOPPED revives to parked, with the
+		// stage-2 clock restarted at observation time (docs/12).
 		if res.Phase == phase.Orphaned && obs.Phase == provider.PhaseRunning {
 			return tx.Resources().CASPhase(ctx, res.ID, phase.Orphaned, phase.Ready, nowMs)
+		}
+		if res.Phase == phase.Orphaned && obs.Phase == provider.PhaseStopped &&
+			r.providers.Parking(res.Provider, res.Kind).Supported {
+			return tx.Resources().CASPhase(ctx, res.ID, phase.Orphaned, phase.Parked, nowMs)
 		}
 		return nil
 	})
@@ -281,6 +287,13 @@ func (r *Reconciler) mintRecord(ctx context.Context, obs *provider.ObservedResou
 		Spec: spec, Extension: obs.Extensions, Capacity: capJSON,
 		Labels:    obs.Labels,
 		CreatedAt: nowMs, UpdatedAt: nowMs,
+	}
+	// The initial phase follows the OBSERVATION (docs/12, design finding):
+	// a restore/re-adopt of a stopped fleet must not mint schedulable
+	// "ready" records for machines that are powered off.
+	if obs.Phase == provider.PhaseStopped && r.providers.Parking(res.Provider, res.Kind).Supported {
+		res.Phase = phase.Parked
+		res.ParkedAt = &nowMs
 	}
 	err := r.st.Tx(ctx, func(tx storage.TxStore) error {
 		if err := tx.Resources().Create(ctx, res); err != nil {

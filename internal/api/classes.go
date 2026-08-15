@@ -38,13 +38,23 @@ func (s *Server) upsertClass(w http.ResponseWriter, r *http.Request, name string
 		writeError(w, reqID, http.StatusBadRequest, "invalid", "metadata.name disagrees with the URL", false)
 		return
 	}
-	var reclaim, maxWait time.Duration
+	var reclaim, reclaimDel, maxWait time.Duration
+	var park string
 	var err error
-	if req.Spec.Reclaim != nil && req.Spec.Reclaim.IdleAfter != "" {
-		if reclaim, err = time.ParseDuration(req.Spec.Reclaim.IdleAfter); err != nil {
-			writeError(w, reqID, http.StatusBadRequest, "invalid", "reclaim.idleAfter: "+err.Error(), false)
-			return
+	if r := req.Spec.Reclaim; r != nil {
+		if r.IdleAfter != "" {
+			if reclaim, err = time.ParseDuration(r.IdleAfter); err != nil {
+				writeError(w, reqID, http.StatusBadRequest, "invalid", "reclaim.idleAfter: "+err.Error(), false)
+				return
+			}
 		}
+		if r.DeleteAfter != "" {
+			if reclaimDel, err = time.ParseDuration(r.DeleteAfter); err != nil {
+				writeError(w, reqID, http.StatusBadRequest, "invalid", "reclaim.deleteAfter: "+err.Error(), false)
+				return
+			}
+		}
+		park = r.Park
 	}
 	if req.Spec.Scheduling != nil && req.Spec.Scheduling.Queue != nil && req.Spec.Scheduling.Queue.MaxWait != "" {
 		if maxWait, err = time.ParseDuration(req.Spec.Scheduling.Queue.MaxWait); err != nil {
@@ -54,7 +64,7 @@ func (s *Server) upsertClass(w http.ResponseWriter, r *http.Request, name string
 	}
 	rec, err := s.app.UpsertClass(r.Context(), app.UpsertClassCmd{
 		Name: name, Kind: req.Spec.Kind, Provider: req.Spec.Provider,
-		Template: req.Spec.Template, ReclaimIdle: reclaim, QueueMaxWait: maxWait,
+		Template: req.Spec.Template, ReclaimIdle: reclaim, ReclaimPark: park, ReclaimDel: reclaimDel, QueueMaxWait: maxWait,
 		Actor: principalOf(r).Name, MustCreate: mustCreate,
 	})
 	switch {
@@ -120,9 +130,15 @@ func toClassEnvelope(rec *storage.ClassRecord) apiclient.Class {
 		},
 		Source: rec.Source,
 	}
-	if rec.ReclaimIdleAfterMs != nil {
-		env.Spec.Reclaim = &apiclient.ClassReclaim{
-			IdleAfter: (time.Duration(*rec.ReclaimIdleAfterMs) * time.Millisecond).String()}
+	if rec.ReclaimIdleAfterMs != nil || rec.ReclaimPark != "" || rec.ReclaimDeleteAfterMs != nil {
+		cr := &apiclient.ClassReclaim{Park: rec.ReclaimPark}
+		if rec.ReclaimIdleAfterMs != nil {
+			cr.IdleAfter = (time.Duration(*rec.ReclaimIdleAfterMs) * time.Millisecond).String()
+		}
+		if rec.ReclaimDeleteAfterMs != nil {
+			cr.DeleteAfter = (time.Duration(*rec.ReclaimDeleteAfterMs) * time.Millisecond).String()
+		}
+		env.Spec.Reclaim = cr
 	}
 	if rec.QueueMaxWaitMs != nil {
 		env.Spec.Scheduling = &apiclient.ClassScheduling{Queue: &apiclient.ClassQueue{

@@ -30,6 +30,8 @@ func (s *Server) Routes() []RouteDef {
 		{Method: "GET", Pattern: "/v1/resources/{id}", SpecPath: "/v1/resources/{id}", Perm: PermResourceRead, handler: s.getResource},
 		{Method: "DELETE", Pattern: "/v1/resources/{id}", SpecPath: "/v1/resources/{id}", Perm: PermResourceDelete, Mutating: true, handler: s.deleteResource},
 		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "drain", SpecPath: "/v1/resources/{id}:drain", Perm: PermResourceDelete, Mutating: true, handler: s.drainResource},
+		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "park", SpecPath: "/v1/resources/{id}:park", Perm: PermResourceDelete, Mutating: true, handler: s.parkResource},
+		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "start", SpecPath: "/v1/resources/{id}:start", Perm: PermResourceCreate, Mutating: true, handler: s.startResource},
 
 		{Method: "POST", Pattern: "/v1/pools", SpecPath: "/v1/pools", Perm: PermPoolWrite, Mutating: true, handler: s.createPool},
 		{Method: "GET", Pattern: "/v1/pools", SpecPath: "/v1/pools", Perm: PermPoolRead, handler: s.listPools},

@@ -18,6 +18,9 @@ func TestFakeConformance(t *testing.T) {
 		DeleteSteps:  1,
 		ListLagSteps: 2,
 		PageSize:     2,
+		Park:         true,
+		StopSteps:    2,
+		StartSteps:   2,
 	})
 	conformance.Run(t, conformance.Harness{
 		Provider: f,
@@ -35,7 +38,7 @@ func TestFakeConformance(t *testing.T) {
 // Synchronous mode passes identically (near-miss: the kit must not depend
 // on asynchrony).
 func TestFakeConformanceSynchronous(t *testing.T) {
-	f := fake.New("fake-conf-sync", "owner-conf", fake.Options{})
+	f := fake.New("fake-conf-sync", "owner-conf", fake.Options{Park: true})
 	conformance.Run(t, conformance.Harness{
 		Provider: f,
 		Kind:     f.Kind(),

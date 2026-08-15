@@ -15,6 +15,7 @@ Everything mutating flows through a crash-safe **operation journal**: kill the p
 - **Pools** — declare "keep N machines of this class"; the reconciler holds the fleet at that size with a bounded mutation budget per cycle.
 - **Acquisitions and leases** — `fleetplane acquire` binds you to an existing machine when capacity is free, or creates one when it is not; leases carry TTLs and idle machines are reclaimed by policy.
 - **Cost-aware leasing** — providers declare billing windows (e.g. per-started-hour); Fleetplane reuses already-paid capacity, queues acquisitions to pack work into paid windows, and times deletions to land before billing boundaries ([design doc 11](docs/11_COST_AWARE_LEASING.md)).
+- **Parked machines (the warm tier)** — where stopped machines bill at storage price (GCP, AWS), idle machines are parked instead of deleted and restarted in seconds instead of re-provisioned in minutes; the scheduler starts a parked machine before creating a new one ([design doc 12](docs/12_PARKED_MACHINES.md)).
 - **Crash-safe operations** — every provider call is journaled first; the operation engine is the only retry authority, and ambiguous outcomes are verified rather than guessed ([ADR-014](docs/adr/ADR-014-retries.md), [ADR-017](docs/adr/ADR-017-operation-states.md)).
 - **Multi-provider** — the same kernel drives Hetzner Cloud, DigitalOcean, AWS, and GCP (plus a deterministic fake provider); orchestration code never imports a cloud SDK (enforced mechanically).
 - **Dynamic classes** — machine templates managed via API/CLI/dashboard or config, validated against the kind registry at definition time.
@@ -155,7 +156,7 @@ The kernel (API, scheduler, reconciler, operation engine, storage) is provider-a
 
 Deeper background:
 
-- Design docs: [`docs/`](docs/) (`00_README.md` … `11_COST_AWARE_LEASING.md`)
+- Design docs: [`docs/`](docs/) (`00_README.md` … `12_PARKED_MACHINES.md`)
 - Architecture decision records: [`docs/adr/`](docs/adr/)
 - Runbooks: [backup and restore](docs/runbooks/backup-restore.md)
 - OpenAPI contract: [`api/openapi.yaml`](api/openapi.yaml)

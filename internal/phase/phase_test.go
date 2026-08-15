@@ -7,8 +7,9 @@ func TestNoDeletedPhase(t *testing.T) {
 	if Valid(Phase("deleted")) {
 		t.Fatal(`"deleted" must not be a phase`)
 	}
-	if len(All) != 8 {
-		t.Fatalf("phase set has %d entries, want the 8 of 05 §7", len(All))
+	// 05 §7's 8 phases plus docs/12's parked tier (parking/parked/starting).
+	if len(All) != 11 {
+		t.Fatalf("phase set has %d entries, want 11 (05 §7 + docs/12)", len(All))
 	}
 }
 
@@ -25,6 +26,17 @@ func TestTransitionTable(t *testing.T) {
 		{Allocated, Orphaned}, // provider lost a leased VM; leases stay active
 		{Orphaned, Ready},     // re-observed
 		{Unknown, Ready},
+		// docs/12: the parked tier.
+		{Ready, Parking},
+		{Parking, Parked},
+		{Parking, Ready}, // stop failed: machine still running
+		{Parked, Starting},
+		{Starting, Ready},  // running + probe
+		{Starting, Parked}, // start failed: machine still stopped
+		{Starting, Failed}, // started but unhealthy (probe exhausted)
+		{Parked, Deleting}, // stage-2 / surplus: direct delete, no drain
+		{Parked, Orphaned}, // stopped machine deleted in the cloud console
+		{Orphaned, Parked}, // re-observed stopped
 	}
 	for _, tr := range allowed {
 		if !CanTransition(tr.from, tr.to) {
@@ -37,6 +49,11 @@ func TestTransitionTable(t *testing.T) {
 		{Deleting, Ready},         // deletes don't resurrect
 		{Failed, Ready},           // failed resources are replaced, not revived
 		{Ready, Provisioning},
+		// docs/12 guards.
+		{Allocated, Parking}, // leased machines are never parked (invariant 3 ext.)
+		{Parked, Ready},      // parked machines return only through starting
+		{Parked, Draining},   // nothing to drain: deletes are direct
+		{Parking, Starting},  // must land parked (or revert) first
 	}
 	for _, tr := range forbidden {
 		if CanTransition(tr.from, tr.to) {

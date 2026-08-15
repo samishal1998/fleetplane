@@ -269,6 +269,29 @@
           "type": "integer",
           "minimum": 0
         },
+        "park": {
+          "title": "Park capability",
+          "description": "Declares stop/resume (ParkAware) for compute.machine — the test control for parked machines (docs 12). false (default) = the driver cannot park.",
+          "type": "boolean"
+        },
+        "stopSteps": {
+          "title": "Stop steps",
+          "description": "ObserveOperation calls until a stop lands `stopped`. 0 (default) = stops complete immediately.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "startSteps": {
+          "title": "Start steps",
+          "description": "ObserveOperation calls until a start lands `running`. 0 (default) = starts complete immediately.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "startEstimate": {
+          "title": "Start estimate",
+          "description": "The StartEstimate hint the driver's park policy declares (typical stopped->running latency, feeds queue-wait estimation until observed data exists).",
+          "examples": ["45s"],
+          "allOf": [{ "$ref": "#/definitions/duration" }]
+        },
         "billing": {
           "title": "Declared billing policies (per kind)",
           "description": "Per-kind billing policies the fake driver declares (docs 11) — the test control for billing-window behavior. Map of resource kind (e.g. compute.machine) to policy.",
@@ -571,14 +594,26 @@
         },
         "reclaim": {
           "title": "Idle reclamation",
-          "description": "Poolless idle reclamation (plan R21): resources created from this class are deleted automatically once idle. Absent = never auto-reclaimed.",
+          "description": "Poolless idle reclamation (plan R21), two-stage on park-capable providers (docs 12): resources created from this class are parked or deleted automatically once idle. Absent = never auto-reclaimed.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "idleAfter": {
               "title": "Idle threshold",
-              "description": "A class-created resource that is ready, has no active leases, and is not delete-protected is drained and deleted after being idle this long (a journaled delete, counted against the reconciler's mutation budget).",
+              "description": "Stage 1: a class-created resource that is ready, has no active leases, and is not delete-protected is reclaimed after being idle this long — parked on park-capable providers (unless park: never), drained and deleted otherwise (a journaled mutation, counted against the reconciler's mutation budget).",
               "examples": ["5m"],
+              "allOf": [{ "$ref": "#/definitions/duration" }]
+            },
+            "park": {
+              "title": "Stage-1 disposition on park-capable providers",
+              "description": "auto (default; unset/empty means the same): park idle machines — a journaled stop into the storage-price tier — on providers that declare the capability (gcp and aws for compute.machine; the fake driver via its park setting). never: always delete, exactly the pre-parking behavior. Any other value is a boot error. On providers without the capability the value is a no-op (docs 12 §5).",
+              "type": "string",
+              "enum": ["auto", "never"]
+            },
+            "deleteAfter": {
+              "title": "Stage-2 parked lifetime",
+              "description": "Delete machines that have been parked this long. Unset/0 = parked forever (they are cheap; the fleet keeps its warm tier). POOLLESS CLASSES ONLY — pool fleet size is owned by replicas convergence, so pool specs reject deleteAfter (docs 12 §5).",
+              "examples": ["4h"],
               "allOf": [{ "$ref": "#/definitions/duration" }]
             }
           }

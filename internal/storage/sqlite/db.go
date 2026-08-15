@@ -107,7 +107,11 @@ func (d *DB) Close() error {
 
 // migrate refuses schemas newer than the binary (downgrade guard, ADR-010),
 // then applies pending migrations. Each .sql file runs in its own
-// transaction (goose default); pragmas never appear in migrations.
+// transaction (goose default); pragmas never appear in migrations — with
+// one documented exception class: table REBUILDS (e.g. 0004's phase-CHECK
+// change) must run NO TRANSACTION with foreign_keys toggled off, because
+// the pragma is a no-op inside a transaction. Migrations run on the
+// single-connection writer, so such pragmas hold across statements.
 func migrate(ctx context.Context, db *sql.DB) error {
 	goose.SetBaseFS(migrationsFS)
 	goose.SetLogger(goose.NopLogger())

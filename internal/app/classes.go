@@ -55,9 +55,17 @@ func (r *ClassRegistry) Class(name string) (reconcile.Class, bool) {
 
 func toReconcileClass(rec *storage.ClassRecord) reconcile.Class {
 	cls := reconcile.Class{Kind: rec.Kind, Provider: string(rec.Provider), Spec: rec.Spec}
-	if rec.ReclaimIdleAfterMs != nil && *rec.ReclaimIdleAfterMs > 0 {
-		cls.Reclaim = &reconcile.ReclaimPolicy{
-			IdleAfter: compute.Duration(time.Duration(*rec.ReclaimIdleAfterMs) * time.Millisecond)}
+	// ANY reclaim field constitutes a policy — a deleteAfter-only or
+	// park-only class must not silently lose it (design finding).
+	if (rec.ReclaimIdleAfterMs != nil && *rec.ReclaimIdleAfterMs > 0) || rec.ReclaimPark != "" ||
+		(rec.ReclaimDeleteAfterMs != nil && *rec.ReclaimDeleteAfterMs > 0) {
+		cls.Reclaim = &reconcile.ReclaimPolicy{Park: rec.ReclaimPark}
+		if rec.ReclaimIdleAfterMs != nil {
+			cls.Reclaim.IdleAfter = compute.Duration(time.Duration(*rec.ReclaimIdleAfterMs) * time.Millisecond)
+		}
+		if rec.ReclaimDeleteAfterMs != nil {
+			cls.Reclaim.DeleteAfter = compute.Duration(time.Duration(*rec.ReclaimDeleteAfterMs) * time.Millisecond)
+		}
 	}
 	if rec.QueueMaxWaitMs != nil && *rec.QueueMaxWaitMs > 0 {
 		cls.QueueMaxWait = time.Duration(*rec.QueueMaxWaitMs) * time.Millisecond
@@ -86,9 +94,16 @@ func SeedConfigClasses(ctx context.Context, st storage.Store, classes map[string
 				Name: name, Kind: cls.Kind, Provider: storage.ProviderInstance(cls.Provider),
 				Spec: cls.Spec, Source: "config", CreatedAt: nowMs, UpdatedAt: nowMs,
 			}
-			if cls.Reclaim != nil && cls.Reclaim.IdleAfter.Std() > 0 {
-				ms := cls.Reclaim.IdleAfter.Std().Milliseconds()
-				rec.ReclaimIdleAfterMs = &ms
+			if r := cls.Reclaim; r != nil {
+				if r.IdleAfter.Std() > 0 {
+					ms := r.IdleAfter.Std().Milliseconds()
+					rec.ReclaimIdleAfterMs = &ms
+				}
+				rec.ReclaimPark = r.Park
+				if r.DeleteAfter.Std() > 0 {
+					ms := r.DeleteAfter.Std().Milliseconds()
+					rec.ReclaimDeleteAfterMs = &ms
+				}
 			}
 			if cls.QueueMaxWait > 0 {
 				ms := cls.QueueMaxWait.Milliseconds()
@@ -110,6 +125,8 @@ type UpsertClassCmd struct {
 	Provider     string
 	Template     json.RawMessage
 	ReclaimIdle  time.Duration
+	ReclaimPark  string // "", "auto", "never"
+	ReclaimDel   time.Duration
 	QueueMaxWait time.Duration
 	Actor        string
 	// MustCreate: POST semantics — fail with ErrClassExists when present.
@@ -138,8 +155,11 @@ func (s *Service) UpsertClass(ctx context.Context, cmd UpsertClassCmd) (*storage
 	if _, ok := s.providers.Instance(storage.ProviderInstance(cmd.Provider)); !ok {
 		return nil, invalid("unknown provider instance %q", cmd.Provider)
 	}
-	if cmd.ReclaimIdle < 0 || cmd.QueueMaxWait < 0 {
-		return nil, invalid("reclaim.idleAfter and scheduling.queue.maxWait must be >= 0")
+	if cmd.ReclaimIdle < 0 || cmd.ReclaimDel < 0 || cmd.QueueMaxWait < 0 {
+		return nil, invalid("reclaim and queue durations must be >= 0")
+	}
+	if p := cmd.ReclaimPark; p != "" && p != "auto" && p != "never" {
+		return nil, invalid("reclaim.park must be auto or never, got %q", p)
 	}
 	if pt := s.pendingTimeoutMs; pt > 0 && cmd.QueueMaxWait.Milliseconds() > pt {
 		return nil, invalid("scheduling.queue.maxWait exceeds acquire.pendingTimeout (%s)",
@@ -154,6 +174,11 @@ func (s *Service) UpsertClass(ctx context.Context, cmd UpsertClassCmd) (*storage
 	if cmd.ReclaimIdle > 0 {
 		ms := cmd.ReclaimIdle.Milliseconds()
 		rec.ReclaimIdleAfterMs = &ms
+	}
+	rec.ReclaimPark = cmd.ReclaimPark
+	if cmd.ReclaimDel > 0 {
+		ms := cmd.ReclaimDel.Milliseconds()
+		rec.ReclaimDeleteAfterMs = &ms
 	}
 	if cmd.QueueMaxWait > 0 {
 		ms := cmd.QueueMaxWait.Milliseconds()

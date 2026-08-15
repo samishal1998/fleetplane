@@ -126,6 +126,16 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 			Kind: "storage.volume", Provider: "fake-local",
 			Spec: json.RawMessage(`{"sizeGiB":100,"filesystem":"ext4"}`),
 		},
+		// docs/12: park-capable class — idle machines stop into the warm
+		// tier at 10m and are deleted after 2h parked.
+		"ci-park": reconcile.Class{
+			Kind: "compute.machine", Provider: "fake-local",
+			Spec: json.RawMessage(machineSpec),
+			Reclaim: &reconcile.ReclaimPolicy{
+				IdleAfter:   compute.Duration(10 * time.Minute),
+				DeleteAfter: compute.Duration(2 * time.Hour),
+			},
+		},
 		// docs/11: queue-enabled class — acquisitions wait up to 10m for
 		// existing/in-flight capacity before scaling up.
 		"ci-queue": reconcile.Class{

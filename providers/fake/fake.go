@@ -49,6 +49,20 @@ type Options struct {
 	// Billing declares per-kind billing policies (docs/11) — the test
 	// control for billing-window behavior.
 	Billing map[string]BillingSettings `json:"billing,omitempty"`
+	// Park enables stop/resume for compute.machine (docs/12) — the test
+	// control for the parked warm tier.
+	Park          bool             `json:"park,omitempty"`
+	StopSteps     int              `json:"stopSteps,omitempty"`     // observations until a stop lands stopped
+	StartSteps    int              `json:"startSteps,omitempty"`    // observations until a start lands running
+	StartEstimate compute.Duration `json:"startEstimate,omitempty"` // ParkPolicy hint
+}
+
+// Parking implements provider.ParkAware from the instance settings.
+func (f *Fake) Parking(kind provider.ResourceKind) provider.ParkPolicy {
+	if f.opt.Park && kind == compute.Kind {
+		return provider.ParkPolicy{Supported: true, StartEstimate: f.opt.StartEstimate.Std()}
+	}
+	return provider.ParkPolicy{}
 }
 
 // BillingSettings is the JSON shape of one kind's billing policy.
@@ -119,7 +133,7 @@ type Fake struct {
 type object struct {
 	id        string
 	name      string
-	state     string // creating | running | deleting | gone
+	state     string // creating | running | stopping | stopped | starting | deleting | gone
 	stepsLeft int
 	listLag   int
 	spec      compute.MachineSpec
@@ -445,6 +459,47 @@ func (f *Fake) applyLocked(action provider.Action) (provider.OperationRef, error
 		}
 		return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref}, nil
 
+	case "stop", "start":
+		if action.Ref == nil {
+			return provider.OperationRef{}, &provider.Error{
+				Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
+				Provider: f.instance, Message: action.Kind + " requires a ref",
+			}
+		}
+		if !f.opt.Park {
+			return provider.OperationRef{}, &provider.Error{
+				Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
+				Provider: f.instance, Message: "parking not supported (docs/12 invariant 6 violated by the caller)",
+			}
+		}
+		o, ok := f.objects[action.Ref.ID]
+		if !ok || o.state == "gone" {
+			return provider.OperationRef{}, f.notFound(action.Ref.ID)
+		}
+		ref := provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref}
+		if action.Kind == "stop" {
+			// IDEMPOTENT (docs/12 §3): stop of stopped/stopping succeeds.
+			if o.state == "stopped" || o.state == "stopping" {
+				return ref, nil
+			}
+			if f.opt.StopSteps > 0 {
+				o.state, o.stepsLeft = "stopping", f.opt.StopSteps
+			} else {
+				o.state = "stopped"
+			}
+			return ref, nil
+		}
+		// IDEMPOTENT: start of running/starting succeeds.
+		if o.state == "running" || o.state == "starting" {
+			return ref, nil
+		}
+		if f.opt.StartSteps > 0 {
+			o.state, o.stepsLeft = "starting", f.opt.StartSteps
+		} else {
+			o.state = "running"
+		}
+		return ref, nil
+
 	default:
 		return provider.OperationRef{}, &provider.Error{
 			Class: provider.ErrInvalid, SideEffect: provider.EffectNone,
@@ -488,6 +543,20 @@ func (f *Fake) ObserveOperation(_ context.Context, op provider.OperationRef) (pr
 			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref}, nil
 		}
 		return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref}, nil
+	case "stopping":
+		o.stepsLeft--
+		if o.stepsLeft <= 0 {
+			o.state = "stopped"
+		} else {
+			return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref}, nil
+		}
+	case "starting":
+		o.stepsLeft--
+		if o.stepsLeft <= 0 {
+			o.state = "running"
+		} else {
+			return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref}, nil
+		}
 	}
 	obs := f.observeLocked(o)
 	return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
@@ -511,6 +580,12 @@ func (f *Fake) observeLocked(o *object) provider.ObservedResource {
 		ph = provider.PhasePending
 	case "running":
 		ph = provider.PhaseRunning
+	case "stopping":
+		ph = provider.PhaseRunning // still billing until the stop lands
+	case "stopped":
+		ph = provider.PhaseStopped
+	case "starting":
+		ph = provider.PhasePending
 	case "deleting":
 		ph = provider.PhaseDeleting
 	default:

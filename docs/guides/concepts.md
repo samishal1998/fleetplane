@@ -13,7 +13,7 @@ For full depth, see the [design docs](../00_README.md) (especially [02 Architect
 | Pool | `pool_` | Desired capacity: "keep N resources of this class alive" |
 | Acquisition | `acq_` | One "give me capacity" request |
 | Lease | `lease_` | Capacity of one resource allocated to one holder |
-| Operation | `op_` | One journaled provider mutation (create/delete) |
+| Operation | `op_` | One journaled provider mutation (create/delete/stop/start) |
 | Event | `evt_` | One append-only audit record |
 
 All IDs are `<prefix>_<ULID>` ([ADR-004](../adr/ADR-004-ids.md)).
@@ -38,7 +38,7 @@ fleetplane resources                 # ID  KIND  PROVIDER  PHASE  EXTERNAL  NAME
 fleetplane resources get res_01ABC   # full JSON envelope
 ```
 
-### The eight phases
+### The eleven phases
 
 A resource's `status.phase` is Fleetplane's *orchestration* view — not the provider's native machine state (which is normalized separately and cached as an observation):
 
@@ -48,6 +48,9 @@ A resource's `status.phase` is Fleetplane's *orchestration* view — not the pro
 | `provisioning` | A create operation is journaled or executing at the provider |
 | `ready` | Live and eligible for leases |
 | `allocated` | At least one active lease holds its capacity |
+| `parking` | A stop operation is journaled or executing (parked machines, below) |
+| `parked` | Stopped at the provider — storage-price tier, restartable in seconds |
+| `starting` | A start operation is journaled or executing |
 | `draining` | No new leases; will be deleted once existing leases end |
 | `deleting` | A delete operation is journaled or executing |
 | `failed` | An operation failed terminally; the only exit is deletion |
@@ -157,6 +160,27 @@ What that changes in practice:
 - **Active leases always win.** Cost-based reclamation never touches a leased machine — correctness and lease guarantees take precedence over cost optimization.
 
 Billing awareness is **per provider instance, per resource kind, and off by default**: it activates only where the driver declares a billing policy (Hetzner and DigitalOcean ship hourly defaults for machines) or where the config sets one — and `disabled: true` opts a kind back out. Providers with fine-grained billing keep the ordinary lease/idle reclamation path unchanged. The knobs live in the [configuration reference](configuration.md#billing-providersnamebilling); whether the optimization is actually paying off is measurable — see the [operations guide's cost metrics](operations.md#cost-aware-leasing-metrics).
+
+## Parked machines (the warm tier)
+
+Some providers bill a *stopped* machine at a small fraction of its running price: a stopped GCE instance incurs no compute charge (only its disks and static IPs keep billing), and a stopped EC2 instance bills only its EBS volumes and Elastic IPs. Starting a stopped machine takes seconds to about a minute; provisioning a fresh one takes minutes. Fleetplane models this as a third price tier between *running* and *deleted* ([design doc 12](../12_PARKED_MACHINES.md), [ADR-019](../adr/ADR-019-parked-machines.md)):
+
+```text
+running   — full price, serving or ready to serve
+parked    — storage-and-IP price, restartable in seconds
+deleted   — free, recreate from scratch
+```
+
+What that changes in practice:
+
+- **Three new phases.** `ready → parking → parked` (a journaled stop) and `parked → starting → ready` (a journaled start plus a fresh readiness probe). Stop and start are idempotent driver actions, so crash recovery is plain re-dispatch — they never freeze `uncertain` for duplication reasons. A failed stop reverts `parking → ready`; a failed start reverts `starting → parked`. A parked machine keeps its identity labels, its external ID, and its ownership — it is still fleet, just cheap.
+- **Reclaim becomes two-stage.** At `reclaim.idleAfter`, an idle machine on a park-capable provider is *parked* instead of deleted (opt out with `reclaim.park: never`); a second knob, `reclaim.deleteAfter`, deletes machines parked that long — unset keeps them parked indefinitely. `deleteAfter` is poolless-only: pool fleet size is owned by `replicas` convergence, so pool specs reject it. See the [configuration reference](configuration.md#reclaimpark-and-reclaimdeleteafter-two-stage-reclaim).
+- **The scheduler ladder gains a rung.** Reuse before create becomes: reserve an idle `ready` machine (milliseconds) → **start a `parked` compatible machine** (seconds to ~a minute) → queue for capacity inside `maxWait` → create a new machine (minutes). Starting a parked machine pre-binds the acquisition and CASes `parked → starting`, which also serializes concurrent claimers — the loser falls through the ladder. Parked machines feed queue estimates too: the expected wait is the observed p50 start duration (falling back to the driver's estimate, then 60s), usually well inside any `maxWait`.
+- **Pools get a warm tier.** `spec.minRunning` keeps at least that many machines hot (provisioning/starting/ready/allocated); idle machines above the floor are parked per the reclaim policy, and when the pool falls below the floor it **starts parked machines before creating new ones**. `replicas` counts hot + parked — a parked machine is still fleet. Unset `minRunning` means no parking: pools behave exactly as before unless you opt in.
+- **It only exists where the economics are real.** Parking is a provider capability (GCP and AWS declare it for `compute.machine`; the fake driver opts in via settings). Hetzner and DigitalOcean bill powered-off machines at **full price**, so those drivers do not park — there the delete-and-recreate path above stays optimal, and nothing new is journaled.
+- **The IP changes on restart.** GCP and AWS release the ephemeral public IP at stop, so a restarted machine usually has a **new address**. Fleetplane re-observes addresses and re-runs the readiness probe after every start — a parked machine becomes a scheduling candidate again only after both succeed. Don't cache pre-park addresses.
+
+Operators can park and start explicitly — `POST /v1/resources/{id}:park` / `:start`, `fleetplane resources park`/`start`, or the dashboard's Park/Start buttons — alongside the automatic policy. The usual gates hold either way: a leased machine is never parked, and parking never changes ownership or identity. Whether the tier is earning its keep is measurable — see the [operations guide's parked-machines metrics](operations.md#parked-machines-metrics).
 
 ## The operation journal
 
@@ -270,6 +294,8 @@ Everything above has a visual counterpart in the embedded web dashboard: fleet o
 - [05 Reconciliation and scheduling](../05_RECONCILIATION_AND_SCHEDULING.md) — the reconciliation equation, scheduler steps
 - [06 Storage and HA](../06_STORAGE_AND_HA.md) — the journal protocol, SQLite, the HA path
 - [11 Cost-aware leasing](../11_COST_AWARE_LEASING.md) — billing windows, queueing, termination policy
+- [12 Parked machines](../12_PARKED_MACHINES.md) — the stop/resume warm tier
 - [ADR-014](../adr/ADR-014-retries.md) — why the operation engine is the only retry authority
 - [ADR-017](../adr/ADR-017-operation-states.md) — operation states, tombstone deletion, ghost vs. orphan
 - [ADR-018](../adr/ADR-018-cost-aware-leasing.md) — the cost-aware leasing implementation decisions
+- [ADR-019](../adr/ADR-019-parked-machines.md) — the parked-machines implementation decisions

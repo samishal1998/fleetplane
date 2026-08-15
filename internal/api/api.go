@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/provision"
 	"github.com/samishal1998/fleetplane/internal/storage"
 	"github.com/samishal1998/fleetplane/pkg/apiclient"
 )
@@ -142,6 +144,33 @@ func (s *Server) drainResource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"id": r.PathValue("id"), "status": "draining"})
 }
 
+func (s *Server) parkResource(w http.ResponseWriter, r *http.Request) {
+	s.parkStart(w, r, s.app.ParkResource, "parking")
+}
+
+func (s *Server) startResource(w http.ResponseWriter, r *http.Request) {
+	s.parkStart(w, r, s.app.StartResource, "starting")
+}
+
+// parkStart implements the idempotent status matrix (docs/12): 202 on a
+// fresh journal, 200 when already in/entering the requested state (a
+// retried request whose response was lost must not see a conflict), 409
+// otherwise.
+func (s *Server) parkStart(w http.ResponseWriter, r *http.Request, act func(context.Context, string, string) error, status string) {
+	id := r.PathValue("id")
+	err := act(r.Context(), id, principalOf(r).Name)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusAccepted, map[string]string{"id": id, "status": status})
+	case errors.Is(err, app.ErrAlreadyThere):
+		writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": status})
+	case errors.Is(err, provision.ErrParkUnsupported):
+		writeError(w, w.Header().Get("X-Request-Id"), http.StatusConflict, "park_unsupported", err.Error(), false)
+	default:
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+	}
+}
+
 // --- serialization ---
 
 func toEnvelope(r *storage.Resource) apiclient.Resource {
@@ -166,6 +195,10 @@ func toEnvelope(r *storage.Resource) apiclient.Resource {
 	}
 	if r.ExternalID != nil {
 		env.Status.ExternalID = *r.ExternalID
+	}
+	if r.ParkedAt != nil {
+		t := time.UnixMilli(*r.ParkedAt).UTC()
+		env.Status.ParkedAt = &t
 	}
 	if r.DeletedAt != nil {
 		t := time.UnixMilli(*r.DeletedAt).UTC()

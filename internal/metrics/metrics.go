@@ -53,6 +53,23 @@ var (
 		Name: "fleetplane_resource_paid_idle_seconds_total",
 		Help: "Paid-but-idle time of terminated billing-aware resources (paid - useful, clamped at 0)",
 	}, []string{"provider", "kind"})
+
+	// docs/12: parked machines.
+	ResourceParkTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "fleetplane_resource_park_total",
+		Help: "Machines parked (stopped to the storage-price tier, docs/12)",
+	}, []string{"provider"})
+
+	ResourceStartTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "fleetplane_resource_start_total",
+		Help: "Parked machines started back into service",
+	}, []string{"provider"})
+
+	StartSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "fleetplane_resource_start_seconds",
+		Help:    "Start operation duration, journal to ready (incl. readiness probe) — feeds queue-wait estimates",
+		Buckets: prometheus.ExponentialBuckets(1, 2, 9), // 1s .. ~4m
+	}, []string{"provider"})
 )
 
 // Register registers every cost metric on the given registry (boot calls
@@ -60,5 +77,6 @@ var (
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(ResourceReuse, ScaleUpAvoided, AcquisitionQueueSeconds,
 		TerminationSeconds, BoundaryOverruns, WindowMissed,
-		PaidSeconds, UsefulSeconds, PaidIdleSeconds)
+		PaidSeconds, UsefulSeconds, PaidIdleSeconds,
+		ResourceParkTotal, ResourceStartTotal, StartSeconds)
 }

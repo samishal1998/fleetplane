@@ -214,6 +214,40 @@ fleetplane resources drain res_01J8FYK2N9V1X4T7Q0C3E6H9SD
 res_01J8FYK2N9V1X4T7Q0C3E6H9SD: draining
 ```
 
+### fleetplane resources park
+
+Stop a ready machine into the near-free parked tier
+([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)) —
+`POST /v1/resources/{id}:park`. The stop is journaled and asynchronous —
+follow the `resource.stop` operation with `fleetplane operations`, or poll
+`fleetplane resources` until the phase is `parked`. On a provider that
+cannot park (Hetzner, DigitalOcean) the request fails with 409 (exit code
+5); a leased machine is refused the same way.
+
+```bash
+fleetplane resources park res_01J8FYK2N9V1X4T7Q0C3E6H9SD
+```
+
+```text
+res_01J8FYK2N9V1X4T7Q0C3E6H9SD: parking
+```
+
+### fleetplane resources start
+
+Start a parked machine back into service — `POST /v1/resources/{id}:start`.
+The machine becomes `ready` again only after a fresh readiness probe, since
+its public IP has usually changed across the stop/start cycle. Repeating
+either command is safe: the API is idempotent and answers with the current
+state instead of a conflict.
+
+```bash
+fleetplane resources start res_01J8FYK2N9V1X4T7Q0C3E6H9SD
+```
+
+```text
+res_01J8FYK2N9V1X4T7Q0C3E6H9SD: starting
+```
+
 ## fleetplane acquire
 
 Acquire capacity: reuse an existing machine that satisfies the constraints, or create a
@@ -404,18 +438,22 @@ fleetplane classes
 ```
 
 ```text
-NAME      KIND             PROVIDER      SOURCE  RECLAIM  QUEUE
-ci-large  compute.machine  hetzner-main  config  5m0s     -
-burst     compute.machine  hetzner-main  api     5m0s     10m0s
+NAME      KIND             PROVIDER      SOURCE  RECLAIM  PARK  DELETE-AFTER  QUEUE
+ci-large  compute.machine  hetzner-main  config  5m0s     auto  -             -
+burst     compute.machine  gcp-main      api     10m0s    auto  4h0m0s        10m0s
 ```
+
+`PARK` and `DELETE-AFTER` are the two-stage reclaim knobs for
+[parked machines](concepts.md#parked-machines-the-warm-tier); `PARK` shows
+`auto` when unset (the default).
 
 ### fleetplane classes create
 
 ```bash
 fleetplane classes create burst \
-  --provider hetzner-main \
-  --template '{"serverType":"cpx31","image":"snapshot:ci-runner=v12"}' \
-  --reclaim-idle-after 5m --queue-max-wait 10m
+  --provider gcp-main \
+  --template '{"serverType":"e2-medium","image":"family:debian-cloud/debian-12"}' \
+  --reclaim-idle-after 10m --reclaim-delete-after 4h --queue-max-wait 10m
 ```
 
 | Flag | Default | Description |
@@ -425,6 +463,8 @@ fleetplane classes create burst \
 | `--template` | — | Kind-specific spec as inline JSON |
 | `--template-file` | — | Kind-specific spec from a JSON file |
 | `--reclaim-idle-after` | — | Idle reclamation policy, e.g. `5m` |
+| `--reclaim-park` | — | Stage-1 disposition on park-capable providers: `auto` (default) or `never` |
+| `--reclaim-delete-after` | — | Delete machines parked this long, e.g. `4h` (poolless classes only) |
 | `--queue-max-wait` | — | Acquisition queue budget, e.g. `10m` |
 
 The template is validated against the kind registry at write time.

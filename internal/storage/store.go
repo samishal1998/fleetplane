@@ -123,6 +123,9 @@ type AcquisitionStore interface {
 	// transaction (plan R5); the resource is reachable via the lease.
 	Bind(ctx context.Context, id AcquisitionID, lease LeaseID, atMillis int64) error
 	SetPendingResource(ctx context.Context, id AcquisitionID, res ResourceID) error
+	// ClearPendingResource detaches a failed pre-bind (docs/12: a failed
+	// start returns the acquisition to pending with no resource attached).
+	ClearPendingResource(ctx context.Context, id AcquisitionID) error
 	// ListByState powers acquisition crash-resume (plan R6).
 	ListByState(ctx context.Context, states ...AcqState) ([]*Acquisition, error)
 }

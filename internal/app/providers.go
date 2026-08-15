@@ -154,6 +154,19 @@ func (p *Providers) Billing(name storage.ProviderInstance, kind string) (provide
 	return provider.BillingPolicy{}, false
 }
 
+// Parking resolves the stop/resume capability (docs/12). Implements
+// provision.Providers.
+func (p *Providers) Parking(name storage.ProviderInstance, kind string) provider.ParkPolicy {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if inst, ok := p.instances[name]; ok {
+		if pa, ok := inst.(provider.ParkAware); ok {
+			return pa.Parking(provider.ResourceKind(kind))
+		}
+	}
+	return provider.ParkPolicy{}
+}
+
 // Names lists configured instances, sorted.
 func (p *Providers) Names() []string {
 	p.mu.RLock()

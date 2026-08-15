@@ -118,8 +118,12 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 			return nil, fmt.Errorf("classes.%s: %w", name, err)
 		}
 		rc := reconcile.Class{Kind: cls.Kind, Provider: cls.Provider, Spec: specJSON}
-		if cls.Reclaim != nil {
-			rc.Reclaim = &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(cls.Reclaim.IdleAfter.Std())}
+		if r := cls.Reclaim; r != nil && (r.IdleAfter > 0 || r.Park != "" || r.DeleteAfter > 0) {
+			rc.Reclaim = &reconcile.ReclaimPolicy{
+				IdleAfter:   compute.Duration(r.IdleAfter.Std()),
+				Park:        r.Park,
+				DeleteAfter: compute.Duration(r.DeleteAfter.Std()),
+			}
 		}
 		if cls.Scheduling != nil && cls.Scheduling.Queue != nil {
 			rc.QueueMaxWait = cls.Scheduling.Queue.MaxWait.Std()

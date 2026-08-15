@@ -100,7 +100,31 @@ func resourcesCmd(r *root) *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(get, del, create, drain)
+	park := &cobra.Command{
+		Use:   "park ID",
+		Short: "Stop a ready machine into the near-free parked tier (docs/12)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := r.client().ParkResource(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: parking\n", args[0])
+			return nil
+		},
+	}
+	start := &cobra.Command{
+		Use:   "start ID",
+		Short: "Start a parked machine back into service",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := r.client().StartResource(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: starting\n", args[0])
+			return nil
+		},
+	}
+	cmd.AddCommand(get, del, create, drain, park, start)
 	return cmd
 }
 

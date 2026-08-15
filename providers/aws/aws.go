@@ -9,6 +9,16 @@
 // secret:// references resolved at construction time. When the static pair
 // is omitted entirely, the driver falls back to the SDK's ambient credential
 // chain (environment, shared config/credentials files, IMDS/IRSA roles).
+//
+// Parked machines (docs/12): the driver implements provider.ParkAware and
+// the idempotent "stop"/"start" actions via StopInstances/StartInstances.
+// EC2 RELEASES the ephemeral public IPv4 address at stop and usually assigns
+// a DIFFERENT one at start, so a start operation's success snapshot carries
+// the freshly observed addresses — callers must re-observe addresses and
+// re-probe readiness after every start, never reuse pre-stop ones. Spot and
+// instance-store-backed instances cannot stop: EC2 rejects the call with
+// UnsupportedOperation, mapped to invalid/EffectNone so the kernel fails
+// fast and falls back to delete/create semantics for that machine.
 package aws
 
 import (
@@ -72,6 +82,8 @@ type ec2API interface {
 	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	RunInstances(ctx context.Context, in *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
 	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+	StopInstances(ctx context.Context, in *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
+	StartInstances(ctx context.Context, in *ec2.StartInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StartInstancesOutput, error)
 	DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
 	DescribeInstanceTypes(ctx context.Context, in *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
 	DescribeRegions(ctx context.Context, in *ec2.DescribeRegionsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeRegionsOutput, error)
@@ -185,6 +197,20 @@ func (d *AWS) Billing(kind provider.ResourceKind) provider.BillingPolicy {
 		return provider.BillingPolicy{MinimumDuration: time.Minute}
 	}
 	return provider.BillingPolicy{}
+}
+
+// Parking implements provider.ParkAware (docs/12 §3): EBS-backed EC2
+// instances stop and resume, billing only their volumes and Elastic IPs
+// while stopped. StartEstimate is the honest per-cloud hint — EC2 starts
+// typically land in tens of seconds. Undeclared kinds get the zero policy
+// (the conformance capability contract). Spot and instance-store-backed
+// instances cannot stop; the stop action surfaces EC2's
+// UnsupportedOperation as invalid so the kernel reverts parking→ready.
+func (d *AWS) Parking(kind provider.ResourceKind) provider.ParkPolicy {
+	if kind == compute.Kind {
+		return provider.ParkPolicy{Supported: true, StartEstimate: 30 * time.Second}
+	}
+	return provider.ParkPolicy{}
 }
 
 func (d *AWS) Descriptor() provider.Descriptor {
@@ -356,11 +382,19 @@ type createParams struct {
 }
 
 // opData is OperationRef.Data (self-versioned; drivers tolerate nil). A
-// create's Data serializes exactly as {"v":1,"instanceId":"i-..."}.
+// create's Data serializes exactly as {"v":1,"instanceId":"i-..."} (frozen);
+// deletes add the legacy "delete":true flag (still written); stop/start add
+// the op-kind discriminator "op":"stop"|"start" (docs/12) so ObserveOperation
+// can apply per-kind terminal predicates. Backward decode stays truthful:
+// pre-parking Data was only ever create- or delete-shaped, so instanceId
+// without a discriminator IS a create. Nil/corrupt Data degrades to
+// OpUnknown — never a guessed predicate, which could falsely succeed a stop
+// on a still-running machine.
 type opData struct {
 	V          int    `json:"v"`
 	InstanceID string `json:"instanceId"`
 	Delete     bool   `json:"delete,omitempty"`
+	Op         string `json:"op,omitempty"` // "stop" | "start"
 }
 
 func (d *AWS) Apply(ctx context.Context, action provider.Action) (provider.OperationRef, error) {
@@ -369,6 +403,8 @@ func (d *AWS) Apply(ctx context.Context, action provider.Action) (provider.Opera
 		return d.applyCreate(ctx, action)
 	case "delete":
 		return d.applyDelete(ctx, action)
+	case "stop", "start":
+		return d.applyStopStart(ctx, action)
 	default:
 		return provider.OperationRef{}, &provider.Error{Class: provider.ErrInvalid,
 			SideEffect: provider.EffectNone, Provider: d.instance, Message: "unknown action kind " + action.Kind}
@@ -496,13 +532,101 @@ func (d *AWS) applyDelete(ctx context.Context, action provider.Action) (provider
 	return provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}, nil
 }
 
+// applyStopStart implements the idempotent "stop" and "start" actions
+// (docs/12 §3). The pre-mutation DescribeInstances is the idempotency read:
+// a machine already at — or moving toward — the target state short-circuits
+// to success, so a crash-duplicated dispatch is a no-op. Identity tags, the
+// instance ID and EBS volumes all survive a stop natively on EC2. A vanished
+// machine (missing, shutting-down or terminated) is ErrNotFound — the engine
+// fails the op and reverts the phase (docs/12 §7).
+func (d *AWS) applyStopStart(ctx context.Context, action provider.Action) (provider.OperationRef, error) {
+	if action.Ref == nil {
+		return provider.OperationRef{}, &provider.Error{Class: provider.ErrInvalid,
+			SideEffect: provider.EffectNone, Provider: d.instance, Message: action.Kind + " requires a ref"}
+	}
+	state, err := d.instanceState(ctx, action.Ref.ID)
+	if err != nil {
+		return provider.OperationRef{}, err // incl. not_found: vanished machine
+	}
+	if state == ec2types.InstanceStateNameShuttingDown || state == ec2types.InstanceStateNameTerminated {
+		return provider.OperationRef{}, d.notFound(action.Ref.ID)
+	}
+	data, _ := json.Marshal(opData{V: 1, InstanceID: action.Ref.ID, Op: action.Kind})
+	ref := provider.OperationRef{ActionID: action.ActionID, Ref: action.Ref, Data: data}
+
+	if action.Kind == "stop" {
+		// IDEMPOTENT (docs/12 §3): stop of stopped/stopping is success.
+		if state == ec2types.InstanceStateNameStopped || state == ec2types.InstanceStateNameStopping {
+			return ref, nil
+		}
+		release, err := d.pacer.Acquire(ctx)
+		if err != nil {
+			return provider.OperationRef{}, d.preflight(err)
+		}
+		defer release()
+		if _, err := d.api.StopInstances(ctx, &ec2.StopInstancesInput{InstanceIds: []string{action.Ref.ID}}); err != nil {
+			// UnsupportedOperation (spot / instance-store-backed) maps to
+			// invalid+EffectNone in mapErr: fail fast, the kernel cleanly
+			// reverts parking→ready and falls back to delete/create.
+			return provider.OperationRef{}, d.mapErr(err, provider.EffectMaybe)
+		}
+		return ref, nil
+	}
+
+	// IDEMPOTENT: start of running/pending is success.
+	if state == ec2types.InstanceStateNameRunning || state == ec2types.InstanceStateNamePending {
+		return ref, nil
+	}
+	release, err := d.pacer.Acquire(ctx)
+	if err != nil {
+		return provider.OperationRef{}, d.preflight(err)
+	}
+	defer release()
+	if _, err := d.api.StartInstances(ctx, &ec2.StartInstancesInput{InstanceIds: []string{action.Ref.ID}}); err != nil {
+		return provider.OperationRef{}, d.mapErr(err, provider.EffectMaybe)
+	}
+	return ref, nil
+}
+
+// instanceState is the paced single-instance state read backing stop/start
+// idempotency. A missing instance is ErrNotFound.
+func (d *AWS) instanceState(ctx context.Context, id string) (ec2types.InstanceStateName, error) {
+	if id == "" {
+		return "", &provider.Error{Class: provider.ErrInvalid,
+			SideEffect: provider.EffectNone, Provider: d.instance, Message: "empty instance id"}
+	}
+	release, err := d.pacer.Acquire(ctx)
+	if err != nil {
+		return "", d.preflight(err)
+	}
+	out, err := d.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+	release()
+	if err != nil {
+		return "", d.mapErr(err, provider.EffectNone)
+	}
+	for _, r := range out.Reservations {
+		if len(r.Instances) > 0 {
+			if st := r.Instances[0].State; st != nil {
+				return st.Name, nil
+			}
+			return "", nil
+		}
+	}
+	return "", d.notFound(id)
+}
+
 // ObserveOperation polls the instance by ID (never by listing, 05 §10). EC2
 // has no first-class operation objects; the instance state IS the operation
-// state. Terminated instances stay visible for up to an hour: a delete op
-// succeeds as soon as the state is terminated (reported as PhaseGone), a
-// create op whose instance terminated gets the not_found treatment (the
-// engine routes create+not_found to verification; once the terminated
-// instance ages out, plain 404s take over for deletes too).
+// state. Terminal predicates are PER OP KIND (docs/12, the Data "op"
+// discriminator): a delete succeeds on terminated (reported as PhaseGone), a
+// stop succeeds only when the machine is OBSERVED "stopped" (PhaseStopped —
+// "stopping" keeps polling), a start only when observed "running" — the
+// success snapshot carries the freshly observed addresses because the public
+// IP usually changed across the stop/start — and a create on running. A
+// create whose instance terminated gets the not_found treatment (the engine
+// routes create+not_found to verification; once the terminated instance ages
+// out, plain 404s take over for deletes too); a stop/start whose instance
+// vanished is not_found as well — the engine fails and reverts the op.
 func (d *AWS) ObserveOperation(ctx context.Context, op provider.OperationRef) (provider.OperationStatus, error) {
 	if op.Ref == nil {
 		return provider.OperationStatus{State: provider.OpUnknown}, nil
@@ -515,20 +639,55 @@ func (d *AWS) ObserveOperation(ctx context.Context, op provider.OperationRef) (p
 	if err != nil {
 		return provider.OperationStatus{}, err // incl. not_found — engine interprets by op kind
 	}
-	if data.Delete {
+	poll := provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref, RetryAfter: 2 * time.Second}
+	switch {
+	case data.Op == "stop":
+		if obs.Phase == provider.PhaseGone {
+			return provider.OperationStatus{}, d.notFound(op.Ref.ID) // vanished mid-stop
+		}
+		if obs.ProviderState == string(ec2types.InstanceStateNameStopped) {
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
+		}
+		return poll, nil // "stopping" — and "running" before EC2 flips it
+	case data.Op == "start":
+		if obs.Phase == provider.PhaseGone {
+			return provider.OperationStatus{}, d.notFound(op.Ref.ID) // vanished mid-start
+		}
+		if obs.ProviderState == string(ec2types.InstanceStateNameRunning) {
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
+		}
+		return poll, nil // "pending" — and "stopped" before EC2 flips it
+	case data.Delete:
 		if obs.Phase == provider.PhaseGone {
 			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
 		}
-		return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref, RetryAfter: 2 * time.Second}, nil
-	}
-	switch obs.Phase {
-	case provider.PhaseRunning:
-		return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
-	case provider.PhaseGone:
-		// The create's object has vanished (terminated counts): not_found.
-		return provider.OperationStatus{}, d.notFound(op.Ref.ID)
+		return poll, nil
+	case data.InstanceID != "" && data.Op == "":
+		// Create (current and legacy Data both carry instanceId only —
+		// pre-parking ops could only be create- or delete-shaped). The
+		// data.Op == "" guard is load-bearing: an UNRECOGNIZED discriminator
+		// (version skew, foreign data) must degrade to OpUnknown below, never
+		// fall into this create predicate — which would falsely succeed a
+		// stop-shaped op on a still-running machine.
+		switch obs.Phase {
+		case provider.PhaseRunning:
+			return provider.OperationStatus{State: provider.OpSucceeded, Ref: op.Ref, Resource: &obs}, nil
+		case provider.PhaseGone:
+			// The create's object has vanished (terminated counts): not_found.
+			return provider.OperationStatus{}, d.notFound(op.Ref.ID)
+		default:
+			return poll, nil
+		}
 	default:
-		return provider.OperationStatus{State: provider.OpRunning, Ref: op.Ref, RetryAfter: 2 * time.Second}, nil
+		// Data lost/corrupt — or an op discriminator this build does not
+		// recognize: the op kind is unknowable and guessing the create
+		// predicate could falsely succeed a stop on a still-running
+		// machine (docs/12 design blocker). Degrade to resource-status
+		// observation under OpUnknown; the engine keeps polling or caps out.
+		if obs.Phase == provider.PhaseGone {
+			return provider.OperationStatus{}, d.notFound(op.Ref.ID) // engine routes by op kind
+		}
+		return provider.OperationStatus{State: provider.OpUnknown, Ref: op.Ref, Resource: &obs, RetryAfter: 2 * time.Second}, nil
 	}
 }
 
@@ -745,6 +904,20 @@ func (d *AWS) mapErr(err error, effectIfSent provider.SideEffect) error {
 			// No dedicated auth class exists (errors.go); invalid is the
 			// non-retryable fit, matching the other in-tree drivers.
 			e.Class, e.SideEffect = provider.ErrInvalid, provider.EffectNone
+		case code == "UnsupportedOperation":
+			// EC2 rejects stop on spot and instance-store-backed instances
+			// (docs/12 §3) — the request was refused outright, so nothing
+			// mutated. Fail fast as invalid: the kernel reverts the
+			// parking→ready phase and falls back to delete/create.
+			e.Class, e.SideEffect = provider.ErrInvalid, provider.EffectNone
+		case code == "IncorrectInstanceState":
+			// The instance changed state between the stop/start idempotency
+			// read and the mutation (docs/12 race) — EC2 refused the call
+			// outright, so nothing mutated (EffectNone). Retryable, NEVER
+			// invalid: the park re-dispatch's fresh read resolves the truth
+			// (already-at-target → success; terminated → not_found → the
+			// engine reverts the phase), bounded by the engine's attempt cap.
+			e.Class, e.SideEffect = provider.ErrRetryable, provider.EffectNone
 		case code == "IdempotentParameterMismatch":
 			e.Class, e.SideEffect = provider.ErrConflict, effectIfSent
 		case strings.HasSuffix(code, ".Malformed") || code == "ValidationError" ||

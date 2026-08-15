@@ -39,8 +39,10 @@ type ResourceSpec struct {
 // ResourceStatus carries orchestration status; Extensions passes
 // provider-native data through untouched (invariant 6).
 type ResourceStatus struct {
-	Phase       string          `json:"phase"`
-	ExternalID  string          `json:"externalId,omitempty"`
+	Phase      string `json:"phase"`
+	ExternalID string `json:"externalId,omitempty"`
+	// ParkedAt: when the machine entered the parked tier (docs/12).
+	ParkedAt    *time.Time      `json:"parkedAt,omitempty"`
 	ExternalRef json.RawMessage `json:"externalRef,omitempty"`
 	Capacity    json.RawMessage `json:"capacity,omitempty"`
 	Extensions  json.RawMessage `json:"extensions,omitempty"`

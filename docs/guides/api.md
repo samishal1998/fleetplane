@@ -19,7 +19,7 @@ Conventions that apply to every route:
 - **Request IDs** — every response carries an `X-Request-Id` header. Send your own and it is echoed back; otherwise the server generates one (`req_` + 16 hex characters). Error bodies repeat it as `requestId`.
 - **Body limit** — request bodies on the create and update endpoints (resources, acquisitions, pools) are capped at 1 MiB.
 - **Strict decoding** — unknown JSON fields are rejected (HTTP 400) on `POST /v1/resources` and `POST /v1/acquisitions`.
-- **Colon verbs** — actions that are not plain CRUD are spelled as `POST /v1/<collection>/{id}:<verb>` (`:drain`, `:reconcile`, `:resolve`). The path is split at the *last* colon; IDs never contain one ([ADR-005](../adr/ADR-005-http-router.md)). An unknown verb returns 404 `not_found`.
+- **Colon verbs** — actions that are not plain CRUD are spelled as `POST /v1/<collection>/{id}:<verb>` (`:drain`, `:park`, `:start`, `:reconcile`, `:resolve`). The path is split at the *last* colon; IDs never contain one ([ADR-005](../adr/ADR-005-http-router.md)). An unknown verb returns 404 `not_found`.
 - **IDs** — every entity ID is a prefixed ULID: `res_`, `pool_`, `acq_`, `lease_`, `op_`, `evt_` ([ADR-004](../adr/ADR-004-ids.md)).
 - **Async accept** — mutations that touch a provider (create, delete) return `201`/`202` as soon as the intent is durably journaled. The operation engine converges in the background; poll the resource, acquisition, or operation to observe progress.
 
@@ -79,6 +79,8 @@ The server is driven by a single route table that also drives per-route authoriz
 | GET | `/v1/resources/{id}` | `resource.read` | no |
 | DELETE | `/v1/resources/{id}` | `resource.delete` | yes |
 | POST | `/v1/resources/{id}:drain` | `resource.delete` | yes |
+| POST | `/v1/resources/{id}:park` | `resource.delete` | yes |
+| POST | `/v1/resources/{id}:start` | `resource.create` | yes |
 | POST | `/v1/classes` | `class.write` | yes |
 | GET | `/v1/classes` | `class.read` | no |
 | GET | `/v1/classes/{name}` | `class.read` | no |
@@ -124,7 +126,31 @@ manifest shape:
 
 The envelope adds `source` (`config` | `api`). Policy fields (`reclaim`,
 `scheduling.queue`) apply live — the reconciler and scheduler resolve
-classes by name on every pass.
+classes by name on every pass. `reclaim` also takes `park` (`auto` | `never`)
+and `deleteAfter` for [parked machines](concepts.md#parked-machines-the-warm-tier).
+
+### Park and start
+
+`POST /v1/resources/{id}:park` stops a ready machine into the near-free
+parked tier; `:start` brings a parked machine back into service
+([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)).
+Parking requires `resource.delete`; starting requires `resource.create`
+(the route table above). Both are **idempotent at the API level** — a
+retried request whose response was lost sees the current state, never a
+spurious conflict:
+
+| Status | When | Body |
+|---|---|---|
+| `202` | Fresh: the stop/start is journaled; the engine converges it in the background | `{"id": "res_…", "status": "parking"}` (or `"starting"`) |
+| `200` | Already there: the resource is already in — or already moving to — the requested state | same shape |
+| `409` | `park_unsupported`: the provider cannot park this kind. Or `conflict`: the resource is not in a state that can get there (e.g. parking a leased machine, starting a machine that is not parked) | error shape |
+
+An operator's explicit `:park` deliberately bypasses the delete-protected
+gate (protection guards deletion; parking is reversible) and the
+queued-work gate; the automatic reclaim sweep respects both. Poll the
+resource until its phase lands `parked` (or back at `ready` after a
+`:start` — a failed stop reverts `parking → ready`, a failed start reverts
+`starting → parked`).
 
 ## Envelopes
 
@@ -165,7 +191,8 @@ The wire shapes live in `pkg/apiclient` — the server serializes exactly those 
 Notes:
 
 - `metadata.ownership` is `managed`, `adopted`, or `observed`; `metadata.protected` marks delete-protected resources.
-- `status.phase` is one of `unknown`, `provisioning`, `ready`, `allocated`, `draining`, `deleting`, `failed`, `orphaned`. There is no `deleted` phase — deletion terminality is the storage tombstone, surfaced as `metadata.deletedAt` ([ADR-017](../adr/ADR-017-operation-states.md)).
+- `status.phase` is one of `unknown`, `provisioning`, `ready`, `allocated`, `parking`, `parked`, `starting`, `draining`, `deleting`, `failed`, `orphaned`. There is no `deleted` phase — deletion terminality is the storage tombstone, surfaced as `metadata.deletedAt` ([ADR-017](../adr/ADR-017-operation-states.md)).
+- `status.parkedAt` (RFC 3339) appears while the machine is in the parked tier — when it entered `parked` ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)); it clears on the return to `ready`.
 - `status.extensions` is the provider's native object, passed through without translation.
 
 ### Acquisition

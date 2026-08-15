@@ -48,13 +48,27 @@ type Scheduler struct {
 	// the flag reconstitutes itself (the deadline itself is persisted).
 	qmu    sync.Mutex
 	queued map[storage.AcquisitionID]bool
+
+	// startFail is the per-resource start-failure backoff (docs/12 design
+	// blocker): a parked machine whose start keeps failing must not be the
+	// deterministic best-fit forever — rung 2 skips machines under backoff
+	// so the ladder falls through to create. In-memory: a restart forgives
+	// one extra attempt, bounded by the engine's own attempt cap.
+	bmu       sync.Mutex
+	startFail map[storage.ResourceID]startFailState
+}
+
+type startFailState struct {
+	untilMs  int64
+	attempts int
 }
 
 func New(st storage.Store, providers provision.Providers, engine Kicker,
 	classes reconcile.ClassResolver, clock sdk.Clock, log *slog.Logger, ownerID string) *Scheduler {
 	return &Scheduler{st: st, providers: providers, engine: engine, classes: classes,
 		clock: clock, log: log, ownerID: ownerID,
-		queued: map[storage.AcquisitionID]bool{}}
+		queued:    map[storage.AcquisitionID]bool{},
+		startFail: map[storage.ResourceID]startFailState{}}
 }
 
 // Classes exposes the class resolver (shared with pool validation).
@@ -97,6 +111,15 @@ func (s *Scheduler) Satisfy(ctx context.Context, acqID storage.AcquisitionID) (*
 		}
 	}
 
+	// Rung 2 (docs/12 §6): start a parked compatible machine — seconds
+	// instead of minutes, on capacity that is already owned and nearly
+	// free while stopped.
+	if resumed, err := s.startParked(ctx, acq, want); err != nil {
+		return nil, err
+	} else if resumed {
+		return s.st.Acquisitions().Get(ctx, acqID)
+	}
+
 	// Queue decision (docs/11 §7–8): with a queue contract and capacity
 	// expected inside the deadline, stay pending instead of scaling. The
 	// 5s acquisition sweep re-runs Satisfy; past the deadline this branch
@@ -114,6 +137,98 @@ func (s *Scheduler) Satisfy(ctx context.Context, acqID storage.AcquisitionID) (*
 
 	// Step 8: scale on demand (needs a class).
 	return s.scaleOnDemand(ctx, acq)
+}
+
+// startParked claims the best-fit parked compatible machine for the
+// acquisition: one transaction moves the acquisition to provisioning,
+// journals the start (the parked→starting CAS serializes racing claimers)
+// and pre-binds via pending_resource_id — the existing op-terminal bind
+// path completes it (docs/12 §6).
+func (s *Scheduler) startParked(ctx context.Context, acq *storage.Acquisition, want capacity.Vector) (bool, error) {
+	list, err := s.st.Resources().List(ctx, storage.ResourceFilter{
+		Kind:      acq.Kind,
+		Class:     acq.Class,
+		Phases:    []phase.Phase{phase.Parked},
+		Ownership: []storage.Ownership{storage.OwnershipManaged},
+	})
+	if err != nil {
+		return false, err
+	}
+	nowMs := s.clock.Now().UnixMilli()
+	type cand struct {
+		id    storage.ResourceID
+		score int64
+	}
+	var cands []cand
+	for _, res := range list {
+		if s.underStartBackoff(res.ID, nowMs) {
+			continue
+		}
+		if !s.providers.Parking(res.Provider, res.Kind).Supported {
+			continue
+		}
+		total, err := capacity.Parse(res.Capacity)
+		if err != nil || !capacity.Fits(total, capacity.Vector{}, want) {
+			continue
+		}
+		cands = append(cands, cand{id: res.ID, score: capacity.FreeAfter(total, capacity.Vector{}, want)})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score < cands[j].score
+		}
+		return cands[i].id < cands[j].id
+	})
+	for i, c := range cands {
+		if i >= 3 {
+			break
+		}
+		err := s.st.Tx(ctx, func(tx storage.TxStore) error {
+			if err := tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqPending, storage.AcqProvisioning, nowMs); err != nil {
+				return err
+			}
+			if _, err := provision.JournalStart(ctx, tx, s.providers, c.id, nowMs, acq.Actor); err != nil {
+				return err
+			}
+			return tx.Acquisitions().SetPendingResource(ctx, acq.ID, c.id)
+		})
+		if err == nil {
+			s.engine.Kick()
+			s.log.Info("acquisition starting a parked machine (docs/12)",
+				"acquisition_id", acq.ID, "resource_id", c.id)
+			return true, nil
+		}
+		if !errors.Is(err, storage.ErrConflict) {
+			return false, err
+		}
+		// CAS lost (another claimer) — try the next candidate.
+	}
+	return false, nil
+}
+
+func (s *Scheduler) underStartBackoff(id storage.ResourceID, nowMs int64) bool {
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	return nowMs < s.startFail[id].untilMs
+}
+
+func (s *Scheduler) bumpStartBackoff(id storage.ResourceID, nowMs int64) {
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	st := s.startFail[id]
+	st.attempts++
+	delay := (30 * time.Second) << min(st.attempts-1, 5) // 30s..16m
+	if delay > 10*time.Minute {
+		delay = 10 * time.Minute
+	}
+	st.untilMs = nowMs + delay.Milliseconds()
+	s.startFail[id] = st
+}
+
+func (s *Scheduler) clearStartBackoff(id storage.ResourceID) {
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	delete(s.startFail, id)
 }
 
 // markQueued records the queue decision (idempotent; evented once).
@@ -167,7 +282,7 @@ func (s *Scheduler) estimateWait(ctx context.Context, acq *storage.Acquisition, 
 	list, err := s.st.Resources().List(ctx, storage.ResourceFilter{
 		Kind:      acq.Kind,
 		Class:     acq.Class,
-		Phases:    []phase.Phase{phase.Ready, phase.Allocated, phase.Provisioning},
+		Phases:    []phase.Phase{phase.Ready, phase.Allocated, phase.Provisioning, phase.Starting},
 		Ownership: []storage.Ownership{storage.OwnershipManaged},
 	})
 	if err != nil {
@@ -185,6 +300,31 @@ func (s *Scheduler) estimateWait(ctx context.Context, acq *storage.Acquisition, 
 		}
 	}
 	for _, res := range list {
+		if res.Phase == phase.Starting {
+			// A machine being started for another acquisition frees after
+			// the observed start latency plus that holder's TTL (docs/12).
+			if acq.Class == "" || res.Class != acq.Class {
+				continue
+			}
+			if provisioningAcqs == nil {
+				provisioningAcqs, _ = s.st.Acquisitions().ListByState(ctx, storage.AcqProvisioning)
+			}
+			holdMs, skip := int64(0), false
+			for _, pa := range provisioningAcqs {
+				if pa.PendingResourceID != nil && *pa.PendingResourceID == res.ID {
+					if pa.TTLSeconds <= 0 {
+						skip = true
+					}
+					holdMs = pa.TTLSeconds * 1000
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+			better(s.startEstimate(ctx, res.Provider, res.Kind) + time.Duration(holdMs)*time.Millisecond)
+			continue
+		}
 		if res.Phase == phase.Provisioning {
 			// Capacity is unknown until the create lands; estimable only
 			// for class-matched requests (the class fixes the shape).
@@ -234,6 +374,24 @@ func (s *Scheduler) estimateWait(ctx context.Context, acq *storage.Acquisition, 
 		}
 	}
 	return best, found
+}
+
+// startEstimate is the p50 of recent observed start durations, falling
+// back to the driver's hint, then 60s (docs/12 §6).
+func (s *Scheduler) startEstimate(ctx context.Context, prov storage.ProviderInstance, kind string) time.Duration {
+	ops, err := s.st.Operations().RecentTerminal(ctx, prov, storage.OpKindStart, 20)
+	if err == nil && len(ops) > 0 {
+		ds := make([]time.Duration, 0, len(ops))
+		for _, op := range ops {
+			ds = append(ds, time.Duration(op.UpdatedAt-op.CreatedAt)*time.Millisecond)
+		}
+		sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+		return ds[len(ds)/2]
+	}
+	if hint := s.providers.Parking(prov, kind).StartEstimate; hint > 0 {
+		return hint
+	}
+	return 60 * time.Second
 }
 
 // provisioningEstimate is the p50 of recent observed create durations for
@@ -471,10 +629,18 @@ func (s *Scheduler) scaleOnDemand(ctx context.Context, acq *storage.Acquisition)
 }
 
 // HandleOpTerminal binds waiting acquisitions when their pre-bound create
-// lands (wired into engine.OnTerminal alongside the reconciler).
+// OR start lands (wired into engine.OnTerminal alongside the reconciler).
 func (s *Scheduler) HandleOpTerminal(op *storage.Operation) {
-	if op.Kind != storage.OpKindCreate || op.ResourceID == nil {
+	if (op.Kind != storage.OpKindCreate && op.Kind != storage.OpKindStart) || op.ResourceID == nil {
 		return
+	}
+	if op.Kind == storage.OpKindStart {
+		switch op.State {
+		case storage.OpSucceeded:
+			s.clearStartBackoff(*op.ResourceID)
+		case storage.OpFailed, storage.OpAborted:
+			s.bumpStartBackoff(*op.ResourceID, s.clock.Now().UnixMilli())
+		}
 	}
 	ctx := context.Background()
 	open, err := s.st.Acquisitions().ListByState(ctx, storage.AcqProvisioning)
@@ -485,13 +651,13 @@ func (s *Scheduler) HandleOpTerminal(op *storage.Operation) {
 		if acq.PendingResourceID == nil || *acq.PendingResourceID != *op.ResourceID {
 			continue
 		}
-		s.resolvePending(ctx, acq, op.State)
+		s.resolvePending(ctx, acq, op)
 	}
 }
 
-func (s *Scheduler) resolvePending(ctx context.Context, acq *storage.Acquisition, opState storage.OpState) {
+func (s *Scheduler) resolvePending(ctx context.Context, acq *storage.Acquisition, op *storage.Operation) {
 	nowMs := s.clock.Now().UnixMilli()
-	switch opState {
+	switch op.State {
 	case storage.OpSucceeded:
 		want, exclusive, err := wantOf(acq)
 		if err != nil {
@@ -503,10 +669,27 @@ func (s *Scheduler) resolvePending(ctx context.Context, acq *storage.Acquisition
 			s.log.Error("pre-bound reservation failed", "acquisition_id", acq.ID, "error", err)
 		}
 	case storage.OpFailed, storage.OpAborted:
+		if op.Kind == storage.OpKindStart {
+			// A failed START is not a failed acquisition: the machine
+			// reverted to parked; the acquisition falls back through the
+			// ladder on the next sweep (backoff keeps it off this machine).
+			s.rePend(ctx, acq, nowMs)
+			return
+		}
 		_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
 			return tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqProvisioning, storage.AcqFailed, nowMs)
 		})
 	}
+}
+
+// rePend returns a provisioning acquisition to pending with no pre-bind.
+func (s *Scheduler) rePend(ctx context.Context, acq *storage.Acquisition, nowMs int64) {
+	_ = s.st.Tx(ctx, func(tx storage.TxStore) error {
+		if err := tx.Acquisitions().Transition(ctx, acq.ID, storage.AcqProvisioning, storage.AcqPending, nowMs); err != nil {
+			return err
+		}
+		return tx.Acquisitions().ClearPendingResource(ctx, acq.ID)
+	})
 }
 
 // Resume re-drives open acquisitions after a restart (plan R6): runs at
@@ -576,9 +759,16 @@ func (s *Scheduler) Resume(ctx context.Context, pendingTimeout int64) error {
 			}
 			switch res.Phase {
 			case phase.Ready:
-				s.resolvePending(ctx, acq, storage.OpSucceeded)
+				s.resolvePending(ctx, acq, &storage.Operation{Kind: storage.OpKindCreate, ResourceID: acq.PendingResourceID, State: storage.OpSucceeded})
 			case phase.Failed:
-				s.resolvePending(ctx, acq, storage.OpFailed)
+				s.resolvePending(ctx, acq, &storage.Operation{Kind: storage.OpKindCreate, ResourceID: acq.PendingResourceID, State: storage.OpFailed})
+			case phase.Parked:
+				// Crash window (docs/12 design finding): the start failed
+				// and reverted before the terminal callback ran — re-pend
+				// so the ladder retries instead of expiring the caller.
+				s.rePend(ctx, acq, nowMs)
+			case phase.Starting:
+				// start in flight — the op terminal callback resolves it.
 			}
 		}
 	}

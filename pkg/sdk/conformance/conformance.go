@@ -59,6 +59,8 @@ func Run(t *testing.T, h Harness) {
 	t.Run("Discovery/OwnedScopeOnlyOwned", c.ownedScopeOnlyOwned)
 	t.Run("Operations/PollingReachesTerminal", c.lifecycle) // same proof, named per 03 §8
 	t.Run("Billing/CapabilityContract", c.billingContract)
+	t.Run("Parking/CapabilityContract", c.parkingContract)
+	t.Run("Parking/StopStartLifecycle", c.parkingLifecycle)
 	if h.Expensive {
 		t.Run("Pagination/OverOnePage", c.pagination)
 	}
@@ -391,5 +393,77 @@ func (c *checker) billingContract(t *testing.T) {
 	}
 	if und := ba.Billing(provider.ResourceKind("conformance.undeclared/kind")); !und.FineGrained() {
 		t.Fatalf("undeclared kind must return the zero policy, got %+v", und)
+	}
+}
+
+// parkingContract validates the optional ParkAware capability (docs/12):
+// stable policy, non-negative estimate, zero policy for undeclared kinds.
+func (c *checker) parkingContract(t *testing.T) {
+	pa, ok := c.h.Provider.(provider.ParkAware)
+	if !ok {
+		t.Skip("provider does not implement ParkAware")
+	}
+	pol := pa.Parking(c.h.Kind)
+	if pol.StartEstimate < 0 {
+		t.Fatalf("StartEstimate must be >= 0: %+v", pol)
+	}
+	if again := pa.Parking(c.h.Kind); again != pol {
+		t.Fatalf("park policy unstable across calls: %+v vs %+v", pol, again)
+	}
+	if und := pa.Parking(provider.ResourceKind("conformance.undeclared/kind")); und.Supported {
+		t.Fatalf("undeclared kind must return the zero policy, got %+v", und)
+	}
+}
+
+// parkingLifecycle proves the load-bearing idempotency contract (docs/12
+// §3/§7): stop-of-stopped and start-of-running succeed, and identity
+// survives a full stop/start cycle.
+func (c *checker) parkingLifecycle(t *testing.T) {
+	pa, ok := c.h.Provider.(provider.ParkAware)
+	if !ok || !pa.Parking(c.h.Kind).Supported {
+		t.Skip("parking not supported")
+	}
+	ctx := context.Background()
+	ref := c.create(t) // running on return (create() polls to success)
+	defer c.destroy(t, ref)
+
+	stop := provider.Action{ActionID: "op-conf-stop-" + c.uid(), Kind: "stop", Ref: &ref}
+	stopRef, err := c.driver.Apply(ctx, stop)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	c.pollToSuccess(t, stopRef)
+	if obs, err := c.driver.Get(ctx, ref); err != nil || obs.Phase != provider.PhaseStopped {
+		t.Fatalf("after stop: phase=%v err=%v, want stopped", obs.Phase, err)
+	}
+	// IDEMPOTENT: a second stop (crash-duplicated dispatch) must succeed.
+	if _, err := c.driver.Apply(ctx, stop); err != nil {
+		t.Fatalf("stop of stopped must succeed (docs/12 §3): %v", err)
+	}
+
+	before, err := c.driver.Get(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := provider.Action{ActionID: "op-conf-start-" + c.uid(), Kind: "start", Ref: &ref}
+	startRef, err := c.driver.Apply(ctx, start)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	c.pollToSuccess(t, startRef)
+	if obs, err := c.driver.Get(ctx, ref); err != nil || obs.Phase != provider.PhaseRunning {
+		t.Fatalf("after start: phase=%v err=%v, want running", obs.Phase, err)
+	}
+	if _, err := c.driver.Apply(ctx, start); err != nil {
+		t.Fatalf("start of running must succeed (docs/12 §3): %v", err)
+	}
+
+	after, err := c.driver.Get(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.FleetplaneID != before.FleetplaneID || after.CreateOpID != before.CreateOpID || !after.Owned {
+		t.Fatalf("identity must survive the stop/start cycle: before %+v after %+v", before, after)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,9 +27,13 @@ import (
 
 // PoolSpec is the pools.spec_json shape (04 §5).
 type PoolSpec struct {
-	Class        string           `json:"class"`
-	Replicas     int              `json:"replicas"`
-	MinReady     int              `json:"minReady,omitempty"`
+	Class    string `json:"class"`
+	Replicas int    `json:"replicas"`
+	MinReady int    `json:"minReady,omitempty"`
+	// MinRunning enables the warm tier (docs/12 §8): keep at least this
+	// many machines hot (provisioning/starting/ready/allocated), parking
+	// idle ones above it. 0/unset = no parking, exactly today's behavior.
+	MinRunning   int              `json:"minRunning,omitempty"`
 	MaxResources int              `json:"maxResources,omitempty"`
 	Reclaim      *ReclaimPolicy   `json:"reclaim,omitempty"`
 	Machine      *json.RawMessage `json:"machine,omitempty"` // inline spec when no class
@@ -38,7 +43,18 @@ type PoolSpec struct {
 
 type ReclaimPolicy struct {
 	IdleAfter compute.Duration `json:"idleAfter,omitempty"`
+	// Park selects stage-1 disposition on park-capable providers
+	// (docs/12 §5): "auto" (default, "" canonicalizes to auto) parks
+	// instead of deleting; "never" keeps today's delete.
+	Park string `json:"park,omitempty"`
+	// DeleteAfter is stage 2: a machine parked this long is deleted.
+	// Zero/unset = parked forever. POOLLESS ONLY — pool fleet size is
+	// owned by replicas convergence (design verification blocker).
+	DeleteAfter compute.Duration `json:"deleteAfter,omitempty"`
 }
+
+// ParkEnabled canonicalizes Park ("" == auto) — never compare raw strings.
+func (p *ReclaimPolicy) ParkEnabled() bool { return p != nil && p.Park != "never" }
 
 // Class is a resolved class template (04 §2).
 type Class struct {
@@ -215,7 +231,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 	list, err := r.st.Resources().List(ctx, storage.ResourceFilter{
 		Poolless:  true,
-		Phases:    []phase.Phase{phase.Ready, phase.Draining},
+		Phases:    []phase.Phase{phase.Ready, phase.Draining, phase.Parked},
 		Ownership: []storage.Ownership{storage.OwnershipManaged},
 	})
 	if err != nil {
@@ -243,10 +259,31 @@ func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 			continue
 		}
 		cls, ok := r.classes.Class(res.Class)
-		if !ok || cls.Reclaim == nil || cls.Reclaim.IdleAfter.Std() <= 0 {
+		if !ok || cls.Reclaim == nil {
 			continue // no policy = never auto-reclaimed
 		}
 		if res.DeleteProtected || costBudget <= 0 {
+			continue
+		}
+		// Stage 2 (docs/12 §5): a machine parked past deleteAfter is
+		// deleted directly (no billing window — a stopped machine bills
+		// ~storage only). Queued compatible work still protects it: rung 2
+		// can start it in seconds.
+		if res.Phase == phase.Parked {
+			da := cls.Reclaim.DeleteAfter.Std()
+			if da <= 0 || res.ParkedAt == nil || nowMs-*res.ParkedAt < da.Milliseconds() {
+				continue
+			}
+			if claimQueued(queued, res) {
+				continue
+			}
+			if err := r.costReclaim(ctx, res, nowMs, phase.Parked); err == nil {
+				n++
+				costBudget--
+			}
+			continue
+		}
+		if cls.Reclaim.IdleAfter.Std() <= 0 {
 			continue
 		}
 		if nowMs-idleSinceOf(res) < cls.Reclaim.IdleAfter.Std().Milliseconds() {
@@ -280,7 +317,21 @@ func (r *Reconciler) ReclaimPoolless(ctx context.Context) (int, error) {
 				}
 			}
 		}
-		if err := r.costReclaim(ctx, res, nowMs); err == nil {
+		// Stage-1 disposition (docs/12 §5): park on capable providers
+		// unless the policy says never; otherwise delete as before.
+		if cls.Reclaim.ParkEnabled() && r.providers.Parking(res.Provider, res.Kind).Supported {
+			err := r.st.Tx(ctx, func(tx storage.TxStore) error {
+				_, err := provision.JournalStop(ctx, tx, r.providers, res.ID, nowMs, "reconciler", true)
+				return err
+			})
+			if err == nil {
+				delete(r.missedBoundary, res.ID)
+				n++
+				costBudget--
+			}
+			continue
+		}
+		if err := r.costReclaim(ctx, res, nowMs, phase.Ready); err == nil {
 			delete(r.missedBoundary, res.ID)
 			n++
 			costBudget--
@@ -388,13 +439,13 @@ func maxDur(a, b time.Duration) time.Duration {
 // costReclaim journals the delete in ONE transaction with all gates
 // re-checked inside it; on any gate failure the resource stays Ready and
 // schedulable.
-func (r *Reconciler) costReclaim(ctx context.Context, res *storage.Resource, nowMs int64) error {
+func (r *Reconciler) costReclaim(ctx context.Context, res *storage.Resource, nowMs int64, from phase.Phase) error {
 	return r.st.Tx(ctx, func(tx storage.TxStore) error {
 		cur, err := tx.Resources().Get(ctx, res.ID)
 		if err != nil {
 			return err
 		}
-		if cur.DeletedAt != nil || cur.Phase != phase.Ready {
+		if cur.DeletedAt != nil || cur.Phase != from {
 			return fmt.Errorf("%w: not reclaimable", storage.ErrConflict)
 		}
 		// In-tx queued-work re-check: conservative — block when the number
@@ -444,7 +495,8 @@ func (r *Reconciler) costReclaim(ctx context.Context, res *storage.Resource, now
 // Delta reports what one cycle decided.
 type Delta struct {
 	Counted, Ready, Provisioning, Allocated, Draining, Failed int
-	Created, Drained, Undrained, Deleted                      int
+	Parking, Parked, Starting                                 int
+	Created, Drained, Undrained, Deleted, ParkedNow, Started  int
 }
 
 type checkpoint struct {
@@ -485,9 +537,14 @@ func (r *Reconciler) RunOnce(ctx context.Context, poolID storage.PoolID) (Delta,
 	d.Allocated = len(byPhase[phase.Allocated])
 	d.Draining = len(byPhase[phase.Draining])
 	d.Failed = len(byPhase[phase.Failed])
+	d.Parking = len(byPhase[phase.Parking])
+	d.Parked = len(byPhase[phase.Parked])
+	d.Starting = len(byPhase[phase.Starting])
 	// provisioning rows ARE the pending creates (co-created with their
-	// journaled op — invariant 4, plan R20).
-	d.Counted = d.Provisioning + d.Ready + d.Allocated
+	// journaled op — invariant 4, plan R20). Parked machines are still
+	// fleet (docs/12 §8): replicas counts hot + parked tiers.
+	d.Counted = d.Provisioning + d.Ready + d.Allocated + d.Parking + d.Parked + d.Starting
+	hot := d.Provisioning + d.Starting + d.Ready + d.Allocated
 
 	budget := r.cfg.MaxMutationsPerCycle
 	nowMs := r.clock.Now().UnixMilli()
@@ -503,6 +560,29 @@ func (r *Reconciler) RunOnce(ctx context.Context, poolID storage.PoolID) (Delta,
 			d.Counted++
 			deficit--
 			budget--
+		}
+	}
+
+	// --- warm-up (docs/12 §8): below the hot floor, start parked machines
+	// before creating new ones — seconds instead of minutes, and no new
+	// spend. ---
+	if spec.MinRunning > 0 && hot < spec.MinRunning && budget > 0 {
+		for _, res := range byPhase[phase.Parked] {
+			if hot >= spec.MinRunning || budget <= 0 {
+				break
+			}
+			err := r.st.Tx(ctx, func(tx storage.TxStore) error {
+				_, err := provision.JournalStart(ctx, tx, r.providers, res.ID, nowMs, "reconciler")
+				return err
+			})
+			if err == nil {
+				d.Started++
+				hot++
+				budget--
+			}
+		}
+		if d.Started > 0 {
+			r.engine.Kick()
 		}
 	}
 
@@ -531,8 +611,38 @@ func (r *Reconciler) RunOnce(ctx context.Context, poolID storage.PoolID) (Delta,
 		}
 	}
 
-	// --- scale down: drain surplus, longest-idle first, keep minReady ---
+	// --- scale down: surplus consumes the PARKED tier first (direct
+	// journaled delete — no leases to drain by construction; deleting the
+	// near-free tier before the hot one is also what keeps the fleet from
+	// dropping below minRunning during a replica reduction), then drains
+	// ready machines, longest-idle first, keeping minReady. ---
 	surplus := d.Counted - spec.Replicas
+	if surplus > 0 && budget > 0 {
+		parkedOldestFirst := append([]*storage.Resource(nil), byPhase[phase.Parked]...)
+		sort.Slice(parkedOldestFirst, func(i, j int) bool {
+			pi, pj := int64(0), int64(0)
+			if parkedOldestFirst[i].ParkedAt != nil {
+				pi = *parkedOldestFirst[i].ParkedAt
+			}
+			if parkedOldestFirst[j].ParkedAt != nil {
+				pj = *parkedOldestFirst[j].ParkedAt
+			}
+			if pi != pj {
+				return pi < pj
+			}
+			return parkedOldestFirst[i].ID < parkedOldestFirst[j].ID
+		})
+		for _, res := range parkedOldestFirst {
+			if surplus <= 0 || budget <= 0 {
+				break
+			}
+			if err := r.costReclaim(ctx, res, nowMs, phase.Parked); err == nil {
+				d.Deleted++
+				surplus--
+				budget--
+			}
+		}
+	}
 	if surplus > 0 && budget > 0 {
 		candidates := reclaimable(byPhase[phase.Ready], reclaim, nowMs)
 		for _, res := range candidates {
@@ -573,6 +683,34 @@ func (r *Reconciler) RunOnce(ctx context.Context, poolID storage.PoolID) (Delta,
 			budget--
 		}
 	}
+	// --- park pass (docs/12 §8): with a warm tier declared, idle ready
+	// machines above BOTH floors get parked. minReady floors the instant
+	// (ready) tier; minRunning floors the powered (hot) tier. ---
+	if spec.MinRunning > 0 && reclaim != nil && reclaim.IdleAfter.Std() > 0 && reclaim.ParkEnabled() && budget > 0 {
+		readyLeft := d.Ready - d.Drained
+		for _, res := range reclaimable(byPhase[phase.Ready], reclaim, nowMs) {
+			if budget <= 0 || readyLeft-1 < spec.MinReady || hot-1 < spec.MinRunning {
+				break
+			}
+			if !r.providers.Parking(res.Provider, res.Kind).Supported {
+				break // one class per pool: no point iterating further
+			}
+			err := r.st.Tx(ctx, func(tx storage.TxStore) error {
+				_, err := provision.JournalStop(ctx, tx, r.providers, res.ID, nowMs, "reconciler", true)
+				return err
+			})
+			if err == nil {
+				d.ParkedNow++
+				readyLeft--
+				hot--
+				budget--
+			}
+		}
+		if d.ParkedNow > 0 {
+			r.engine.Kick()
+		}
+	}
+
 	if d.Deleted > 0 {
 		r.engine.Kick()
 	}

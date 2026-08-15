@@ -16,7 +16,7 @@ type resourceStore struct{ q queryer }
 const resourceCols = `id, name, kind, provider_instance, class, pool_id, ownership, phase,
 	external_id, external_ref_json, generation, observed_generation,
 	spec_json, extension_json, capacity_json, exclusive_alloc, delete_protected,
-	ready_at, last_lease_ended_at, drain_started_at, created_at, updated_at, deleted_at`
+	ready_at, last_lease_ended_at, drain_started_at, parked_at, created_at, updated_at, deleted_at`
 
 func (rs resourceStore) Create(ctx context.Context, r *storage.Resource) error {
 	var poolID sql.NullString
@@ -24,12 +24,12 @@ func (rs resourceStore) Create(ctx context.Context, r *storage.Resource) error {
 		poolID = sql.NullString{String: string(*r.PoolID), Valid: true}
 	}
 	_, err := rs.q.ExecContext(ctx, `INSERT INTO resources (`+resourceCols+`) VALUES
-		(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(r.ID), nsStr(r.Name), r.Kind, string(r.Provider), nsStr(r.Class), poolID,
 		string(r.Ownership), string(r.Phase),
 		ns(r.ExternalID), nb(r.ExternalRef), r.Generation, r.ObservedGeneration,
 		string(r.Spec), nb(r.Extension), nb(r.Capacity), boolInt(r.ExclusiveAlloc), boolInt(r.DeleteProtected),
-		ni(r.ReadyAt), ni(r.LastLeaseEndedAt), ni(r.DrainStartedAt), r.CreatedAt, r.UpdatedAt, ni(r.DeletedAt))
+		ni(r.ReadyAt), ni(r.LastLeaseEndedAt), ni(r.DrainStartedAt), ni(r.ParkedAt), r.CreatedAt, r.UpdatedAt, ni(r.DeletedAt))
 	if err != nil {
 		return mapErr(err)
 	}
@@ -190,6 +190,16 @@ func (rs resourceStore) CASPhase(ctx context.Context, id storage.ResourceID, fro
 		set += ", drain_started_at=?"
 		args = append(args, atMillis)
 	}
+	// docs/12: parked_at is stamped whenever the parked phase is entered
+	// (incl. the starting->parked revert — restarting the stage-2 clock
+	// protects recently-demanded machines) and cleared on return to ready.
+	if to == phase.Parked {
+		set += ", parked_at=?"
+		args = append(args, atMillis)
+	}
+	if to == phase.Ready {
+		set += ", parked_at=NULL"
+	}
 	args = append(args, string(id), string(from))
 	res, err := rs.q.ExecContext(ctx,
 		`UPDATE resources SET `+set+` WHERE id=? AND phase=? AND deleted_at IS NULL`, args...)
@@ -271,7 +281,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanResource(row rowScanner) (*storage.Resource, error) {
 	var r storage.Resource
 	var name, class, poolID, extID, extRef, ext, capj sql.NullString
-	var readyAt, lastLease, drainStarted, deletedAt sql.NullInt64
+	var readyAt, lastLease, drainStarted, parkedAt, deletedAt sql.NullInt64
 	var spec string
 	var excl, prot int
 	err := row.Scan(
@@ -279,7 +289,7 @@ func scanResource(row rowScanner) (*storage.Resource, error) {
 		(*string)(&r.Ownership), (*string)(&r.Phase),
 		&extID, &extRef, &r.Generation, &r.ObservedGeneration,
 		&spec, &ext, &capj, &excl, &prot,
-		&readyAt, &lastLease, &drainStarted, &r.CreatedAt, &r.UpdatedAt, &deletedAt)
+		&readyAt, &lastLease, &drainStarted, &parkedAt, &r.CreatedAt, &r.UpdatedAt, &deletedAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -296,6 +306,7 @@ func scanResource(row rowScanner) (*storage.Resource, error) {
 	r.Spec = []byte(spec)
 	r.ExclusiveAlloc, r.DeleteProtected = excl == 1, prot == 1
 	r.ReadyAt, r.LastLeaseEndedAt, r.DrainStartedAt = ip(readyAt), ip(lastLease), ip(drainStarted)
+	r.ParkedAt = ip(parkedAt)
 	r.DeletedAt = ip(deletedAt)
 	return &r, nil
 }
