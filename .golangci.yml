@@ -18,7 +18,6 @@ linters:
           files:
             - "**/internal/**"
             - "**/pkg/kinds/**"
-          listMode: lax
           deny:
             - pkg: github.com/samishal1998/fleetplane/providers
               desc: kernel never imports providers (02_ARCHITECTURE - Layers)
@@ -36,7 +35,6 @@ linters:
         provider-isolation:
           files:
             - "**/providers/**"
-          listMode: lax
           deny:
             - pkg: github.com/samishal1998/fleetplane/internal
               desc: providers see only pkg/sdk and pkg/kinds
@@ -44,7 +42,6 @@ linters:
         sdk-hygiene:
           files:
             - "**/pkg/sdk/**"
-          listMode: lax
           deny:
             - pkg: github.com/samishal1998/fleetplane/internal
               desc: SDK is a leaf package

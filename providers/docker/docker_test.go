@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -95,6 +96,14 @@ func TestDockerAdoptsCreatedNotStarted(t *testing.T) {
 		var dl net.Dialer
 		return dl.DialContext(ctx, "unix", "/var/run/docker.sock")
 	}}}
+	// The seed bypasses the driver, so it must pull the image itself: on a
+	// fresh runner with -shuffle this test may run before anything else has.
+	pull, err := sock.Post("http://docker/images/create?fromImage="+testImage(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, pull.Body)
+	_ = pull.Body.Close()
 	res, err := sock.Post("http://docker/containers/create", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
