@@ -35,7 +35,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race -shuffle=on -count=1 ./...
+      # ubuntu-latest ships a Docker daemon; the flag turns "docker
+      # unreachable → skip" into a failure so the E2E can't silently vanish.
+      - run: FLEETPLANE_E2E_DOCKER=1 go test -race -shuffle=on -count=1 ./...
 
   lint:
     needs: build
@@ -68,7 +70,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test -race -count=1 -run 'Conformance' ./providers/fake/...
+      - run: FLEETPLANE_E2E_DOCKER=1 go test -race -count=1 -run 'Conformance' ./providers/fake/... ./providers/docker/...
 
   # secrets context is unavailable in job-level `if`; a step exports it.
   preflight:

@@ -113,7 +113,7 @@
           "title": "Driver name",
           "description": "REQUIRED. Which driver implements this instance. The shape of `settings` depends on this value.",
           "type": "string",
-          "enum": ["fake", "hetzner", "digitalocean", "aws", "gcp"]
+          "enum": ["fake", "hetzner", "digitalocean", "aws", "gcp", "docker"]
         },
         "settings": {
           "title": "Driver settings",
@@ -160,6 +160,15 @@
           "then": {
             "required": ["settings"],
             "properties": { "settings": { "$ref": "#/definitions/digitaloceanSettings" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "driver": { "const": "docker" } },
+            "required": ["driver"]
+          },
+          "then": {
+            "properties": { "settings": { "$ref": "#/definitions/dockerSettings" } }
           }
         },
         {
@@ -415,6 +424,31 @@
           "description": "Maximum concurrent in-flight API calls. 5 when zero/unset.",
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "dockerSettings": {
+      "title": "docker driver settings",
+      "description": "Drives compute.machine as Docker containers on a local or remote Engine — a real, asynchronous, label-addressable provider that needs no cloud credentials (ADR-020). Containers stand in for VMs: create+start, stop/start (parking), remove. No credentials: access is the socket's filesystem permission. All keys optional.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "title": "Engine endpoint",
+          "description": "unix:///path/to/docker.sock or tcp://host:2375. Default unix:///var/run/docker.sock.",
+          "type": "string",
+          "examples": ["unix:///var/run/docker.sock", "tcp://127.0.0.1:2375"]
+        },
+        "command": {
+          "title": "Container command",
+          "description": "Entrypoint override for created containers. Default keeps PID 1 alive (sleep); containers that exit make the create operation fail.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "network": {
+          "title": "Docker network",
+          "description": "Network to attach created containers to (HostConfig.NetworkMode). Default: the daemon's default bridge.",
+          "type": "string"
         }
       }
     },

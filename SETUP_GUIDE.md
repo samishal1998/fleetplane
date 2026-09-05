@@ -90,7 +90,7 @@ providers:
       location: fsn1
 ```
 
-Available drivers: `hetzner`, `digitalocean`, `aws`, `gcp`, and `fake` (deterministic in-memory provider, ideal for trying Fleetplane without a cloud account). See sections 8–11 for full provider walkthroughs and section 12 for the credentials and permissions each provider needs.
+Available drivers: `hetzner`, `digitalocean`, `aws`, `gcp`, `docker` (containers on a local Docker Engine — a real provider with no credentials), and `fake` (deterministic in-memory provider, ideal for trying Fleetplane without a cloud account). See sections 8–11 for full provider walkthroughs and section 12 for the credentials and permissions each provider needs.
 
 ### 2.4 Classes
 

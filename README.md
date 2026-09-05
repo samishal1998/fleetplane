@@ -23,7 +23,7 @@ Everything mutating flows through a crash-safe **operation journal**: kill the p
 ## Key features
 
 - Single static Go binary: server, CLI, and web dashboard in one `fleetplane` executable
-- Providers: **Hetzner Cloud**, **DigitalOcean**, **AWS**, **GCP**, and a **fake** provider for local development and tests
+- Providers: **Hetzner Cloud**, **DigitalOcean**, **AWS**, **GCP**, **Docker** (containers as machines — real end-to-end tests with no cloud account), and a **fake** provider for local development and tests
 - Generic resource kinds: `compute.machine` and `storage.volume` (the kind registry is open to more)
 - Declarative apply: `fleetplane apply -f` with multi-doc YAML `Pool` and `Resource` manifests, compiled onto the same imperative API
 - Web dashboard embedded in the binary, served at `/ui/` — no extra deployment, works offline

@@ -129,7 +129,9 @@ func New(ctx context.Context, cfg provider.InstanceConfig) (*GCP, error) {
 		// option.WithCredentialsJSON is deprecated; detect explicitly via
 		// the auth library so the key JSON never rides an option value.
 		creds, err := credentials.DetectDefault(&credentials.DetectOptions{
-			CredentialsJSON: sec.Reveal(),
+			// The deprecation warns about key JSON from untrusted sources;
+			// this is the operator's own secret:// reference (07 §4).
+			CredentialsJSON: sec.Reveal(), //nolint:staticcheck
 			Scopes:          []string{gce.CloudPlatformScope},
 		})
 		if err != nil {

@@ -65,7 +65,7 @@ defaulted at config load — see [acquire](#acquire).)
 ```yaml
 server:    {}   # listen addresses, shutdown
 storage:   {}   # SQLite database path (required)
-providers: {}   # provider instances (hetzner, digitalocean, aws, gcp, fake)
+providers: {}   # provider instances (hetzner, digitalocean, aws, gcp, docker, fake)
 classes:   {}   # reusable creation templates
 engine:    {}   # operation engine tuning
 reconcile: {}   # pool reconciler tuning
@@ -117,7 +117,7 @@ are fine.
 
 | Key | Type | Default | Behavior |
 |---|---|---|---|
-| `providers.<name>.driver` | string | **required** | One of `hetzner`, `digitalocean`, `aws`, `gcp`, `fake`. A provider without a driver is a boot error. |
+| `providers.<name>.driver` | string | **required** | One of `hetzner`, `digitalocean`, `aws`, `gcp`, `docker`, `fake`. A provider without a driver is a boot error. |
 | `providers.<name>.settings` | map | — | Raw driver config block, decoded by the driver itself (tables below). |
 | `providers.<name>.billing` | map | — | Per-kind billing-policy overrides for cost-aware leasing ([below](#billing-providersnamebilling)). |
 
@@ -215,6 +215,28 @@ providers:
     settings:
       token: secret://env/DO_TOKEN
       region: fra1
+```
+
+### Driver: `docker`
+
+Drives `compute.machine` as containers on a Docker Engine — a real provider
+with no credentials, used for local development and the end-to-end test
+suite ([ADR-020](../adr/ADR-020-docker-provider.md)). All settings optional.
+
+| Setting | Type | Default | Behavior |
+|---|---|---|---|
+| `host` | string | `unix:///var/run/docker.sock` | Engine endpoint (`unix://` or `tcp://`). |
+| `command` | []string | `["sleep","2147483647"]` | Container command; must keep PID 1 alive. |
+| `network` | string | default bridge | Docker network for created containers. |
+
+`spec.serverType` is `<cpu>x<memMiB>` (e.g. `2x1024`); `spec.image` is
+`name:<reference>`. Stop/start (parking) is supported. See the
+[providers guide](providers.md#docker).
+
+```yaml
+providers:
+  docker-local:
+    driver: docker
 ```
 
 ### Driver: `aws`

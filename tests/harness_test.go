@@ -69,6 +69,11 @@ type Harness struct {
 	EngineCfg operations.Config
 
 	ownerID string
+
+	// Optional real providers/classes composed next to the fake (E2E
+	// harnesses such as docker); set before open().
+	extraProviders []app.ProviderSpec
+	extraClasses   map[string]reconcile.Class
 }
 
 func (h *Harness) OwnerID() string { return h.ownerID }
@@ -100,7 +105,7 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 	if providers == nil {
 		settings, _ := json.Marshal(fakeOpts)
 		providers, err = app.BuildProviders(ctx, st,
-			[]app.ProviderSpec{{Name: "fake-local", Driver: "fake", Settings: settings}},
+			append([]app.ProviderSpec{{Name: "fake-local", Driver: "fake", Settings: settings}}, h.extraProviders...),
 			ownerID, secretref.NewDefault(), log, h.Clock.Now().UnixMilli())
 		if err != nil {
 			h.t.Fatal(err)
@@ -144,6 +149,9 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 			Reclaim:      &reconcile.ReclaimPolicy{IdleAfter: compute.Duration(10 * time.Minute)},
 			QueueMaxWait: 10 * time.Minute,
 		},
+	}
+	for name, cls := range h.extraClasses {
+		classes[name] = cls
 	}
 	// Production parity: classes are seeded into storage and resolved
 	// through the store-backed registry (dynamic classes).

@@ -6,6 +6,7 @@ import (
 	_ "github.com/samishal1998/fleetplane/pkg/kinds/volume"
 	_ "github.com/samishal1998/fleetplane/providers/aws"
 	_ "github.com/samishal1998/fleetplane/providers/digitalocean"
+	_ "github.com/samishal1998/fleetplane/providers/docker"
 	_ "github.com/samishal1998/fleetplane/providers/fake"
 	_ "github.com/samishal1998/fleetplane/providers/gcp"
 	_ "github.com/samishal1998/fleetplane/providers/hetzner"
