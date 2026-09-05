@@ -163,7 +163,7 @@ Deeper background:
 
 ## Project status
 
-Current release: **v0.2.0**. All phases of the [implementation plan](docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, Hetzner and DigitalOcean drivers, pools and reconciliation, acquisition scheduling, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
+Current release: **v0.7.0**. All phases of the [implementation plan](docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, six drivers, pools and reconciliation, acquisition scheduling, cost-aware leasing, parked machines, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
 
 ## Development
 
@@ -181,3 +181,7 @@ Test layout:
 - Chaos tests are gated behind `FLEETPLANE_CHAOS=1` and print their seed for reproduction.
 
 Kernel purity (orchestration code never imports provider SDKs) is enforced mechanically — see `.golangci.yml` (depguard) and `scripts/check-boundaries.sh`.
+
+## License
+
+[MIT](LICENSE).
