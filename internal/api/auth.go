@@ -126,6 +126,21 @@ func (a *TokenAuthenticator) Authenticate(authHeader string) (Principal, error) 
 	return Principal{TokenID: rec.ID, Name: rec.Name, Perms: rec.Perms}, nil
 }
 
+// ParseToken derives the config record (id + digest) from a plaintext
+// token, so a pre-generated token can be installed into a config without
+// the secret ever being stored.
+func ParseToken(plaintext, name string, perms PermSet) (TokenRecord, error) {
+	body, ok := strings.CutPrefix(strings.TrimSpace(plaintext), "flp_")
+	if !ok {
+		return TokenRecord{}, fmt.Errorf("malformed token: want flp_<id>.<secret>")
+	}
+	id, secret, ok := strings.Cut(body, ".")
+	if !ok || len(id) != 8 || secret == "" {
+		return TokenRecord{}, fmt.Errorf("malformed token: want flp_<id8>.<secret>")
+	}
+	return TokenRecord{ID: id, Name: name, SHA256: sha256.Sum256([]byte(secret)), Perms: perms}, nil
+}
+
 // GenerateToken mints a fresh token: the plaintext (shown once) and the
 // record for the config file.
 func GenerateToken(name string, perms PermSet) (plaintext string, rec TokenRecord, err error) {

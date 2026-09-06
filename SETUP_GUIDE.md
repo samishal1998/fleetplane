@@ -209,6 +209,55 @@ sudo journalctl -u fleetplane -f    # JSON logs on stderr
 
 Crash-safety note: it is always safe to restart or `kill -9` Fleetplane. In-flight provider operations are journaled and resume on the next boot; mutating API requests are rejected with `503` (code `unready`) until recovery completes.
 
+### 4.1 Or: bootstrap the control VM with cloud-init
+
+`fleetplane cloud-init` renders everything in this section — packages, the
+service user, `/etc/fleetplane/{config.yaml,secrets.env}`, the systemd unit,
+the pinned install, `systemctl enable --now` — as one `#cloud-config` you
+hand to your provider as user data when creating the control VM. Run it on
+your workstation:
+
+```bash
+# secrets.env supplies every secret://env/NAME your config references
+printf 'HETZNER_TOKEN=%s\n' "$HETZNER_TOKEN" > secrets.env
+
+fleetplane cloud-init --config config.yaml --env secrets.env \
+  --distro ubuntu --version v0.7.0 --out user-data.yaml
+# token (admin, shown once): flp_8f3a1c2d.Zkw3vWQx…    ← printed to stderr
+```
+
+Then `hcloud server create --user-data-from-file user-data.yaml …`, or paste
+it into the cloud console's user-data field. On first boot the VM installs the
+release, starts the service, and your token works against `http://<vm>:8080`.
+
+What the command checks for you:
+
+- The shipped config is re-validated **after** the token is injected — the
+  exact bytes that land on the VM pass the same strict parse as `serve`.
+- Every `secret://env/NAME` the config references must be satisfied by an
+  `--env` file (KEY=VALUE lines) or your current environment; missing names
+  are one error. `secret://file/...` references are warned about — files are
+  not shipped, place them on the VM yourself.
+- A `storage.path` outside `/var/lib/fleetplane/` is warned about (the
+  service user owns only that directory).
+
+Token: pass a pre-generated one with `--token flp_…` (only its SHA-256 goes
+into the config) or omit it and one is minted with `--token-name`/`--perm`
+and printed once to stderr. The plaintext never appears in the user-data.
+
+Distros (`--distro`): `ubuntu`, `debian`, `fedora`, `rhel`, `rocky`,
+`almalinux`, `centos`, `arch`, `opensuse` — all systemd-based. The only real
+difference is packages: the Fedora/RHEL family ships `curl-minimal`, which
+conflicts with `curl`, so it is not installed there. Ubuntu, Debian, AlmaLinux,
+Arch and openSUSE package lists were verified in containers; SELinux-enforcing
+hosts and Alpine (no systemd) are untested/unsupported.
+
+Exposure note: cloud-init user-data is readable from the provider's metadata
+endpoint by any process on the VM, so the provider credentials in
+`secrets.env` are visible to whatever runs there. That is acceptable for a
+single-purpose control VM; do not reuse the VM for untrusted workloads.
+Comments in your `config.yaml` do not survive the round trip.
+
 ## 5. Verify
 
 Health endpoints are served on both listeners:

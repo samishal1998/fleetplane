@@ -29,6 +29,7 @@ Everything mutating flows through a crash-safe **operation journal**: kill the p
 - Web dashboard embedded in the binary, served at `/ui/` — no extra deployment, works offline
 - Prometheus metrics on a separate loopback ops listener (`/metrics`), plus pprof and hot backup
 - Static token auth with a closed permission set; secrets only ever referenced as `secret://` — never stored in config
+- `fleetplane cloud-init` renders a user-data file that bootstraps the control VM (install, config, secrets, systemd) on Ubuntu, Debian, Fedora/RHEL-family, Arch, or openSUSE
 - SQLite storage (WAL) with online backup via `VACUUM INTO`
 - Discovery sweep: detects orphans and ghosts in the provider account and converges them safely
 

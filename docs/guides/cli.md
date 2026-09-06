@@ -611,6 +611,34 @@ Valid permissions (closed set): `resource.read`, `resource.acquire`, `resource.c
 With no tokens configured, the server runs with authentication **disabled** (open API,
 loud boot warning) and the CLI needs no `--token`.
 
+## fleetplane cloud-init
+
+Render a `#cloud-config` user-data file that bootstraps a Fleetplane control VM:
+installs the pinned release, writes `/etc/fleetplane/config.yaml` (with an API
+token injected) and `/etc/fleetplane/secrets.env`, creates the service user, and
+starts the systemd unit — the [setup guide §4](../../SETUP_GUIDE.md#4-run-under-systemd)
+recipe, generated. Local only; no server call.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--config` | (required) | `config.yaml` to ship; re-validated after the token is injected |
+| `--env` | — | `KEY=VALUE` file supplying `secret://env/NAME` references, repeatable; the current environment is the fallback |
+| `--distro` | `ubuntu` | `ubuntu`, `debian`, `fedora`, `rhel`, `rocky`, `almalinux`, `centos`, `arch`, `opensuse` |
+| `--version` | this CLI's version | Release tag to install; empty means latest |
+| `--token` | — | Pre-generated `flp_…` token; only its digest ships. Omit to generate one (printed once to stderr) |
+| `--token-name` | `admin` | Name for a generated token |
+| `--perm` | `admin` | Permissions for a generated token, repeatable |
+| `--out` | stdout | Output file (mode 0600) |
+
+```bash
+fleetplane cloud-init --config config.yaml --env secrets.env --distro debian --out user-data.yaml
+```
+
+Errors: a referenced `secret://env/NAME` with no value (all missing names listed),
+an unsupported distro, a malformed `--token`, or a config that fails validation.
+Warnings (stderr, non-fatal): `secret://file/` references (not shipped) and a
+`storage.path` outside `/var/lib/fleetplane/`.
+
 ## fleetplane admin backup
 
 Trigger a hot backup (`VACUUM INTO`, safe under WAL) via the **ops listener** — the

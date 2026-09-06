@@ -59,7 +59,7 @@ func Execute(version string) int {
 	cmd.AddCommand(versionCmd(version), serveCmd(), resourcesCmd(r),
 		acquireCmd(r), releaseCmd(r), watchCmd(r), applyCmd(r),
 		poolsCmd(r), classesCmd(r), operationsCmd(r), eventsCmd(r), providersCmd(r),
-		tokenCmd(), adminCmd())
+		tokenCmd(), adminCmd(), cloudInitCmd(version))
 
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "fleetplane:", err)
