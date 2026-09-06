@@ -61,6 +61,7 @@ func (s *Server) createResource(w http.ResponseWriter, r *http.Request) {
 		Kind:     req.Spec.Kind,
 		Provider: req.Spec.Provider,
 		Name:     req.Metadata.Name,
+		Class:    req.Spec.Class,
 		Spec:     req.Spec.Machine,
 		Labels:   req.Metadata.Labels,
 

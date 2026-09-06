@@ -231,3 +231,53 @@ func TestHTTP_AcquireLifecycle(t *testing.T) {
 		t.Fatalf("providers: %+v %v", providers, err)
 	}
 }
+
+// A Resource create may name a class: kind/provider are inherited, machine
+// fields overlay the class spec (shallow), and the resource carries the
+// class so its reclaim policy applies (the documented example at last).
+func TestHTTP_CreateFromClass(t *testing.T) {
+	base, adminTok, _, _ := startAuthServer(t)
+	c := apiclient.New(base, adminTok)
+	ctx := context.Background()
+
+	// Class only — no kind, provider or machine.
+	res, err := c.CreateResource(ctx, apiclient.CreateResourceRequest{
+		Metadata: apiclient.Metadata{Name: "from-class"},
+		Spec:     apiclient.ResourceSpec{Class: "ci-large"},
+	}, "")
+	if err != nil {
+		t.Fatalf("class-only create: %v", err)
+	}
+	if res.Spec.Kind != "compute.machine" || res.Spec.Provider != "fake-local" || res.Spec.Class != "ci-large" {
+		t.Fatalf("inherited spec = %+v", res.Spec)
+	}
+	if !bytes.Contains(res.Spec.Machine, []byte(`"cpx31"`)) {
+		t.Fatalf("class spec not applied: %s", res.Spec.Machine)
+	}
+
+	// Class + override: a different snapshot and a cloud-init file, keeping
+	// the class's serverType.
+	res, err = c.CreateResource(ctx, apiclient.CreateResourceRequest{
+		Metadata: apiclient.Metadata{Name: "from-class-custom"},
+		Spec: apiclient.ResourceSpec{Class: "ci-large",
+			Machine: []byte(`{"image":"snapshot:ci=v2","userData":"#cloud-config\nruncmd: [echo hi]\n"}`)},
+	}, "")
+	if err != nil {
+		t.Fatalf("class+override create: %v", err)
+	}
+	for _, want := range []string{`"cpx31"`, `"snapshot:ci=v2"`, `#cloud-config`} {
+		if !bytes.Contains(res.Spec.Machine, []byte(want)) {
+			t.Fatalf("merged spec missing %s: %s", want, res.Spec.Machine)
+		}
+	}
+
+	// Conflicting provider is a 400, not a silent override.
+	body := []byte(`{"metadata":{"name":"bad"},"spec":{"class":"ci-large","provider":"other"}}`)
+	if code := doReq(t, http.MethodPost, base+"/v1/resources", adminTok, body); code != http.StatusBadRequest {
+		t.Fatalf("conflicting provider: status %d, want 400", code)
+	}
+	body = []byte(`{"metadata":{"name":"bad2"},"spec":{"class":"nope"}}`)
+	if code := doReq(t, http.MethodPost, base+"/v1/resources", adminTok, body); code != http.StatusBadRequest {
+		t.Fatalf("unknown class: status %d, want 400", code)
+	}
+}

@@ -149,28 +149,58 @@ Prints the full resource envelope as JSON:
 
 ### fleetplane resources create
 
-Create a resource from a JSON manifest (`-f` is required).
+Create one resource from a JSON manifest, from flags, or both — flags fill or
+override the manifest. Two starting points:
+
+- **From a class** (`--class`): kind and provider are inherited from the class,
+  and any machine field you pass overlays the class spec — the class's machine
+  from a *different snapshot*, or with a *specific cloud-init file* as user data.
+  The overlay is shallow: a top-level key you set (`image`, `userData`,
+  `labels`, `readiness`, …) replaces the class's value wholesale.
+- **Standalone** (`--provider` + `--server-type` + `--image`): a fully custom
+  machine with no class.
 
 | Flag | Default | Description |
 |---|---|---|
-| `-f`, `--file` | (required) | JSON manifest file |
+| `-f`, `--file` | — | JSON manifest file (`Resource` shape, see below) |
+| `--name` | — | Resource name |
+| `--class` | — | Class to create from (kind/provider inherited) |
+| `--provider` | — | Provider instance (standalone creates) |
+| `--kind` | `compute.machine` | Resource kind |
+| `--server-type` | — | Machine `serverType` |
+| `--image` | — | Machine image, e.g. `snapshot:ci-runner=v12`, `name:ubuntu-24.04` |
+| `--location` | — | Machine location / zone |
+| `--user-data-file` | — | File whose content becomes the machine's `userData` (cloud-init) |
+| `--label` | — | Machine label `key=value`, repeatable |
 | `--idempotency-key` | — | Idempotency key (safe retries) |
+
+```bash
+# The ci-large class, but from a specific snapshot and with my cloud-init:
+fleetplane resources create --class ci-large --name runner-exp \
+  --image "snapshot:ci-runner=v13-rc" --user-data-file ./runner-init.yaml
+
+# A one-off Hetzner machine with no class at all:
+fleetplane resources create --provider hetzner-main --name bastion \
+  --server-type cx22 --image name:debian-12 --location fsn1 \
+  --user-data-file ./bastion-init.yaml --idempotency-key create-bastion
+```
+
+The equivalent manifest (`-f`), with the same class + override semantics:
 
 ```json
 {
   "apiVersion": "fleetplane.io/v1alpha1",
   "kind": "Resource",
-  "metadata": {"name": "ci-large-3"},
+  "metadata": {"name": "runner-exp"},
   "spec": {
-    "kind": "compute.machine",
-    "provider": "hetzner-main",
-    "class": "ci-large"
+    "class": "ci-large",
+    "machine": {"image": "snapshot:ci-runner=v13-rc"}
   }
 }
 ```
 
 ```bash
-fleetplane resources create -f machine.json --idempotency-key create-ci-large-3
+fleetplane resources create -f machine.json --user-data-file ./runner-init.yaml
 ```
 
 ```text
@@ -354,9 +384,12 @@ kind: Resource
 metadata:
   name: bastion
 spec:
-  kind: compute.machine
-  provider: hetzner-main
-  class: ci-large
+  class: ci-large                      # kind/provider inherited from the class
+  machine:                             # shallow overlay on the class spec
+    image: "snapshot:bastion=v3"
+    userData: |                        # a cloud-init file inline, as a block scalar
+      #cloud-config
+      packages: [wireguard]
 ```
 
 ```bash

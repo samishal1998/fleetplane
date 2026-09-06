@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,28 @@ func (e *InFlightError) Error() string {
 type ValidationError struct{ Msg string }
 
 func (e *ValidationError) Error() string { return e.Msg }
+
+// overlayJSON lays the top-level keys of over onto base (shallow: a key in
+// over replaces the base value wholesale). Empty over returns base.
+func overlayJSON(base, over json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(over)) == 0 || string(bytes.TrimSpace(over)) == "null" {
+		return base, nil
+	}
+	var b, o map[string]json.RawMessage
+	if err := json.Unmarshal(base, &b); err != nil {
+		return nil, fmt.Errorf("class spec: %w", err)
+	}
+	if err := json.Unmarshal(over, &o); err != nil {
+		return nil, fmt.Errorf("override must be a JSON object: %w", err)
+	}
+	if b == nil {
+		b = map[string]json.RawMessage{}
+	}
+	for k, v := range o {
+		b[k] = v
+	}
+	return json.Marshal(b)
+}
 
 func invalid(format string, args ...any) error {
 	return &ValidationError{Msg: fmt.Sprintf(format, args...)}
@@ -85,8 +108,11 @@ type CreateResourceCmd struct {
 	Kind     string
 	Provider string
 	Name     string
-	Spec     json.RawMessage // kind-specific (compute.MachineSpec)
-	Labels   map[string]string
+	// Class is optional: kind/provider default from it and Spec is a
+	// shallow overlay on the class spec (top-level keys replace wholesale).
+	Class  string
+	Spec   json.RawMessage // kind-specific (compute.MachineSpec)
+	Labels map[string]string
 
 	Actor       string
 	IdemKey     string // optional
@@ -99,6 +125,26 @@ type CreateResourceCmd struct {
 // CreateResource journals a create (TxA) and returns immediately; the
 // operation engine converges the resource to ready asynchronously.
 func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Outcome, error) {
+	if cmd.Class != "" {
+		rec, err := s.st.Classes().Get(ctx, cmd.Class)
+		if errors.Is(err, storage.ErrNotFound) {
+			return Outcome{}, invalid("unknown class %q", cmd.Class)
+		} else if err != nil {
+			return Outcome{}, err
+		}
+		if cmd.Kind != "" && cmd.Kind != rec.Kind {
+			return Outcome{}, invalid("kind %q conflicts with class %q (kind %s)", cmd.Kind, cmd.Class, rec.Kind)
+		}
+		if cmd.Provider != "" && cmd.Provider != string(rec.Provider) {
+			return Outcome{}, invalid("provider %q conflicts with class %q (provider %s)", cmd.Provider, cmd.Class, rec.Provider)
+		}
+		cmd.Kind, cmd.Provider = rec.Kind, string(rec.Provider)
+		merged, err := overlayJSON(rec.Spec, cmd.Spec)
+		if err != nil {
+			return Outcome{}, invalid("spec overlay: %s", err)
+		}
+		cmd.Spec = merged
+	}
 	kind := provider.ResourceKind(cmd.Kind)
 	if err := kinds.Validate(kind, cmd.Spec); err != nil {
 		return Outcome{}, &ValidationError{Msg: err.Error()}
@@ -114,7 +160,7 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCmd) (Ou
 	nowMs := s.clock.Now().UnixMilli()
 	prepared, err := provision.Prepare(ctx, s.providers, s.ownerID, provision.CreateSpec{
 		Kind: cmd.Kind, Provider: cmd.Provider, Name: cmd.Name,
-		Spec: cmd.Spec, Labels: cmd.Labels,
+		Spec: cmd.Spec, Labels: cmd.Labels, Class: cmd.Class,
 	}, nowMs)
 	if err != nil {
 		return Outcome{}, err

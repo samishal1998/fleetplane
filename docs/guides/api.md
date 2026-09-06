@@ -190,6 +190,7 @@ The wire shapes live in `pkg/apiclient` — the server serializes exactly those 
 
 Notes:
 
+- On create (`POST /v1/resources`), `spec.class` is optional. With a class, `spec.kind` and `spec.provider` are inherited (a different value is a `400`) and `spec.machine` is a **shallow overlay** on the class spec — a top-level key you send (`image`, `userData`, `labels`, …) replaces the class's value wholesale. Without a class, `kind`, `provider` and a full `machine` spec are required.
 - `metadata.ownership` is `managed`, `adopted`, or `observed`; `metadata.protected` marks delete-protected resources.
 - `status.phase` is one of `unknown`, `provisioning`, `ready`, `allocated`, `parking`, `parked`, `starting`, `draining`, `deleting`, `failed`, `orphaned`. There is no `deleted` phase — deletion terminality is the storage tombstone, surfaced as `metadata.deletedAt` ([ADR-017](../adr/ADR-017-operation-states.md)).
 - `status.parkedAt` (RFC 3339) appears while the machine is in the parked tier — when it entered `parked` ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)); it clears on the return to `ready`.

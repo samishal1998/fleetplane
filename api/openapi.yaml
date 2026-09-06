@@ -320,10 +320,11 @@ components:
         metadata: { $ref: "#/components/schemas/Metadata" }
         spec:
           type: object
-          required: [kind, provider]
+          description: "Either set kind+provider with a full machine spec, or name a class: kind and provider are then inherited (a different value is a 400) and machine is a shallow overlay on the class spec — top-level keys such as image or userData replace the class value wholesale."
           properties:
             kind: { type: string }
             provider: { type: string }
+            class: { type: string }
             machine: { type: object }
     AcquireRequest:
       type: object
