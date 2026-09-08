@@ -6,13 +6,9 @@
 <title>Fleetplane</title>
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
-<script>
-  // Apply the persisted theme before first paint to avoid a flash.
-  (function () {
-    var t = localStorage.getItem('fp.theme');
-    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-  })();
-</script>
+<!-- Separate file, not inline: the page's own CSP allows 'self' scripts but
+     not inline ones, and a blocked bootstrap loses the saved theme. -->
+<script src="theme.js"></script>
 </head>
 <body>
 <div id="app"></div>

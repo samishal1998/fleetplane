@@ -24,6 +24,14 @@ func TestServesIndex(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "app.js") {
 		t.Fatal("index.html does not reference app.js")
 	}
+	// theme.js applies the saved theme before first paint. It has to stay a
+	// separate file: the CSP below allows 'self' but not inline scripts.
+	if !strings.Contains(rec.Body.String(), "theme.js") {
+		t.Fatal("index.html does not reference theme.js")
+	}
+	if strings.Contains(rec.Body.String(), "<script>") {
+		t.Fatal("index.html has an inline script; the CSP blocks it")
+	}
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
 		t.Fatalf("missing CSP, got %q", csp)
 	}
@@ -33,6 +41,7 @@ func TestServesAssets(t *testing.T) {
 	for path, ctPrefix := range map[string]string{
 		"/ui/style.css":                 "text/css",
 		"/ui/app.js":                    "text/javascript",
+		"/ui/theme.js":                  "text/javascript",
 		"/ui/vendor/vue.global.prod.js": "text/javascript",
 		"/ui/logo.svg":                  "image/svg+xml",
 	} {

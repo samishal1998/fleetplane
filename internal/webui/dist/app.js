@@ -61,13 +61,15 @@
 
   const toasts = reactive([]);
   let toastSeq = 0;
+  function dismissToast(id) {
+    const i = toasts.findIndex((x) => x.id === id);
+    if (i >= 0) toasts.splice(i, 1);
+  }
   function toast(msg, opts) {
     const t = Object.assign({ id: ++toastSeq, msg: msg, err: false, code: '' }, opts || {});
     toasts.push(t);
-    setTimeout(() => {
-      const i = toasts.findIndex((x) => x.id === t.id);
-      if (i >= 0) toasts.splice(i, 1);
-    }, t.err ? 7000 : 3500);
+    // Errors stay until dismissed — a toast is the only place they appear.
+    if (!t.err) setTimeout(() => dismissToast(t.id), 3500);
   }
   function toastErr(e) { toast(e.message || String(e), { err: true, code: e.code || '' }); }
 
@@ -122,6 +124,19 @@
   }
   const OP_ACTIVE = ['journaled', 'in_flight', 'external_accepted', 'verifying', 'uncertain'];
 
+  // One icon set, one stroke weight, drawn in currentColor — Unicode glyphs
+  // resolve to a different font (and a different weight) per platform.
+  const ICONS = {
+    overview: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
+    resources: 'M3 5h18v6H3zM3 13h18v6H3zM6.5 8h.01M6.5 16h.01',
+    pools: 'M12 3l9 5-9 5-9-5zM3 13l9 5 9-5',
+    classes: 'M4 4h16v4H4zM4 12h7v8H4zM13 12h7v8h-7z',
+    acquisitions: 'M7 8h13l-3-3M17 16H4l3 3',
+    operations: 'M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01',
+    events: 'M3 12h4l3 8 4-16 3 8h4',
+    providers: 'M6.5 18a4 4 0 010-8 6 6 0 0111.4 1.9A3.5 3.5 0 1117.5 18z',
+  };
+
   function rememberAcq(id) {
     const l = JSON.parse(localStorage.getItem('fp.acqs') || '[]');
     if (!l.includes(id)) l.unshift(id);
@@ -166,19 +181,25 @@
       },
       navItems() {
         return [
-          { key: 'overview', label: 'Overview', icon: '◈' },
-          { key: 'resources', label: 'Resources', icon: '▣', count: this.store.counts.resources },
-          { key: 'pools', label: 'Pools', icon: '⬡' },
-          { key: 'classes', label: 'Classes', icon: '▤' },
-          { key: 'acquisitions', label: 'Acquisitions', icon: '⇋' },
-          { key: 'operations', label: 'Operations', icon: '≣', alert: this.store.counts.uncertain },
-          { key: 'events', label: 'Events', icon: '☰' },
-          { key: 'providers', label: 'Providers', icon: '☁' },
+          { key: 'overview', label: 'Overview', icon: ICONS.overview },
+          { key: 'resources', label: 'Resources', icon: ICONS.resources, count: this.store.counts.resources },
+          { key: 'pools', label: 'Pools', icon: ICONS.pools },
+          { key: 'classes', label: 'Classes', icon: ICONS.classes },
+          { key: 'acquisitions', label: 'Acquisitions', icon: ICONS.acquisitions },
+          { key: 'operations', label: 'Operations', icon: ICONS.operations, alert: this.store.counts.uncertain },
+          { key: 'events', label: 'Events', icon: ICONS.events },
+          { key: 'providers', label: 'Providers', icon: ICONS.providers },
         ];
       },
     },
     methods: {
       nav: nav,
+      dismiss: dismissToast,
+      // Focus <main> directly: href="#main" would be read as a route.
+      skipToMain() {
+        const m = document.getElementById('main');
+        if (m) { m.setAttribute('tabindex', '-1'); m.focus(); }
+      },
       setTheme(t) {
         this.store.theme = t;
         if (t === 'system') { delete document.documentElement.dataset.theme; localStorage.removeItem('fp.theme'); }
@@ -215,11 +236,12 @@
     template: `
     <login-view v-if="store.authState !== 'ready'"></login-view>
     <div v-else class="shell">
+      <a class="skip" href="#main" @click.prevent="skipToMain">Skip to content</a>
       <aside class="sidebar">
         <div class="brand"><img src="logo.svg" alt=""> fleetplane</div>
         <button v-for="it in navItems" :key="it.key" class="nav-item"
                 :class="{active: store.route.view === it.key}" @click="nav('/' + it.key)">
-          <span aria-hidden="true">{{ it.icon }}</span> {{ it.label }}
+          <nav-icon :d="it.icon"></nav-icon> {{ it.label }}
           <span v-if="it.count !== undefined && it.count !== null" class="n-count">{{ it.count }}</span>
           <span v-if="it.alert" class="n-alert badge" :style="{color: 'var(--st-serious)', borderColor: 'var(--st-serious)'}"
                 title="Uncertain operations">⚠ {{ it.alert }}</span>
@@ -227,18 +249,19 @@
         <div class="spacer"></div>
         <div class="foot">
           <div class="pill-select" role="group" aria-label="Theme">
-            <button :class="{on: store.theme === 'system'}" @click="setTheme('system')">Auto</button>
-            <button :class="{on: store.theme === 'light'}" @click="setTheme('light')">Light</button>
-            <button :class="{on: store.theme === 'dark'}" @click="setTheme('dark')">Dark</button>
+            <button :class="{on: store.theme === 'system'}" :aria-pressed="store.theme === 'system'" @click="setTheme('system')">Auto</button>
+            <button :class="{on: store.theme === 'light'}" :aria-pressed="store.theme === 'light'" @click="setTheme('light')">Light</button>
+            <button :class="{on: store.theme === 'dark'}" :aria-pressed="store.theme === 'dark'" @click="setTheme('dark')">Dark</button>
           </div>
           <button v-if="store.token" class="btn sm" @click="signOut">Sign out</button>
         </div>
       </aside>
-      <main class="main"><component :is="viewComp" :key="store.route.view + ':' + store.route.id"></component></main>
+      <main class="main" id="main"><component :is="viewComp" :key="store.route.view + ':' + store.route.id"></component></main>
     </div>
-    <div class="toasts">
+    <div class="toasts" role="status" aria-live="polite">
       <div v-for="t in toasts" :key="t.id" class="toast" :class="{err: t.err}">
-        {{ t.msg }} <div v-if="t.code" class="t-code">{{ t.code }}</div>
+        <div>{{ t.msg }}<div v-if="t.code" class="t-code">{{ t.code }}</div></div>
+        <button class="x" @click="dismiss(t.id)" aria-label="Dismiss">✕</button>
       </div>
     </div>`,
   });
@@ -253,6 +276,12 @@
   app.config.globalProperties.$store = store;
 
   // ------------------------------------------------------------------ shared components
+
+  app.component('nav-icon', {
+    props: ['d'],
+    template: `<svg class="nic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="d"></path></svg>`,
+  });
 
   app.component('phase-badge', {
     props: ['phase'],
@@ -275,17 +304,30 @@
   app.component('modal-box', {
     props: ['title'],
     emits: ['close'],
+    // Teleported to <body> so the shell can be made inert without disabling
+    // the dialog itself: focus moves in on open and back to the trigger on
+    // close, and Tab cannot reach the page behind the overlay.
     mounted() {
+      this._prev = document.activeElement;
+      this._shell = document.querySelector('.shell');
+      if (this._shell) this._shell.inert = true;
+      this.$refs.box.focus();
       this._esc = (e) => { if (e.key === 'Escape') this.$emit('close'); };
       document.addEventListener('keydown', this._esc);
     },
-    beforeUnmount() { document.removeEventListener('keydown', this._esc); },
+    beforeUnmount() {
+      document.removeEventListener('keydown', this._esc);
+      if (this._shell) this._shell.inert = false;
+      if (this._prev && this._prev.focus) this._prev.focus();
+    },
     template: `
-    <div class="overlay" @click.self="$emit('close')">
-      <div class="modal" role="dialog" :aria-label="title">
-        <h3>{{ title }}</h3><slot></slot>
+    <teleport to="body">
+      <div class="overlay" @click.self="$emit('close')">
+        <div class="modal" ref="box" tabindex="-1" role="dialog" aria-modal="true" :aria-label="title">
+          <h3>{{ title }}</h3><slot></slot>
+        </div>
       </div>
-    </div>`,
+    </teleport>`,
   });
 
   app.component('json-view', {
@@ -424,7 +466,7 @@
           <div v-else class="tbl-wrap"><table class="tbl"><tbody>
             <tr v-for="e in recentEvents" :key="e.id">
               <td class="sub" :title="$time(e.ts)">{{ $ago(e.ts) }}</td>
-              <td>{{ e.type }}<span v-if="e.outcome" class="sub"> · {{ e.outcome }}</span></td>
+              <td>{{ e.type }}<span v-if="e.outcome" class="sub"> ·&nbsp;{{ e.outcome }}</span></td>
               <td class="id"><a v-if="e.resourceId" :href="'#/resources/' + e.resourceId">{{ e.resourceId }}</a></td>
             </tr></tbody></table></div>
         </div>
@@ -499,7 +541,8 @@
         <div v-else class="tbl-wrap"><table class="tbl">
           <thead><tr><th>Name / ID</th><th>Kind</th><th>Class</th><th>Provider</th><th>Phase</th><th>External ID</th><th>Age</th></tr></thead>
           <tbody><tr v-for="r in live" :key="r.metadata.id" class="rowlink" @click="$nav('/resources/' + r.metadata.id)">
-            <td><strong>{{ r.metadata.name || '—' }}</strong><div class="id sub">{{ r.metadata.id }}</div></td>
+            <td><strong><a :href="'#/resources/' + r.metadata.id" @click.stop>{{ r.metadata.name || r.metadata.id }}</a></strong>
+              <div v-if="r.metadata.name && r.metadata.name !== r.metadata.id" class="id sub">{{ r.metadata.id }}</div></td>
             <td>{{ r.spec.kind }}</td>
             <td>{{ r.spec.class || '—' }}</td>
             <td>{{ r.spec.provider }}</td>
@@ -628,7 +671,8 @@
             <dt v-if="r.status.parkedAt">Parked since</dt><dd v-if="r.status.parkedAt">{{ $time(r.status.parkedAt) }} ({{ $ago(r.status.parkedAt) }})</dd>
             <dt>Created</dt><dd>{{ $time(r.metadata.createdAt) }} ({{ $ago(r.metadata.createdAt) }})</dd>
             <dt>Updated</dt><dd>{{ $time(r.metadata.updatedAt) }}</dd>
-            <dt>Generation</dt><dd>{{ r.metadata.generation }} (observed {{ r.metadata.observedGeneration }})</dd>
+            <template v-if="r.metadata.generation"><dt>Generation</dt>
+              <dd>{{ r.metadata.generation }} (observed {{ r.metadata.observedGeneration }})</dd></template>
           </dl>
         </div>
         <div class="grid2 section">
@@ -712,7 +756,8 @@
         <div v-else class="tbl-wrap"><table class="tbl">
           <thead><tr><th>Name / ID</th><th>Class</th><th>Replicas</th><th>Min ready</th><th>Paused</th><th>Updated</th></tr></thead>
           <tbody><tr v-for="p in items" :key="p.metadata.id" class="rowlink" @click="$nav('/pools/' + p.metadata.id)">
-            <td><strong>{{ p.metadata.name }}</strong><div class="id sub">{{ p.metadata.id }}</div></td>
+            <td><strong><a :href="'#/pools/' + p.metadata.id" @click.stop>{{ p.metadata.name || p.metadata.id }}</a></strong>
+              <div v-if="p.metadata.name && p.metadata.name !== p.metadata.id" class="id sub">{{ p.metadata.id }}</div></td>
             <td>{{ specOf(p).class || (specOf(p).kind || '—') }}</td>
             <td class="num">{{ specOf(p).replicas }}</td>
             <td class="num">{{ specOf(p).minReady || 0 }}</td>
@@ -815,7 +860,8 @@
           <div v-else class="tbl-wrap"><table class="tbl">
             <thead><tr><th>Name / ID</th><th>Phase</th><th>Provider</th><th>External ID</th><th>Age</th></tr></thead>
             <tbody><tr v-for="r in members" :key="r.metadata.id" class="rowlink" @click="$nav('/resources/' + r.metadata.id)">
-              <td><strong>{{ r.metadata.name || '—' }}</strong><div class="id sub">{{ r.metadata.id }}</div></td>
+              <td><strong><a :href="'#/resources/' + r.metadata.id" @click.stop>{{ r.metadata.name || r.metadata.id }}</a></strong>
+                <div v-if="r.metadata.name && r.metadata.name !== r.metadata.id" class="id sub">{{ r.metadata.id }}</div></td>
               <td><phase-badge :phase="r.status.phase"></phase-badge></td>
               <td>{{ r.spec.provider }}</td>
               <td class="id">{{ r.status.externalId || '—' }}</td>
@@ -903,7 +949,7 @@
         <div v-else class="tbl-wrap mt"><table class="tbl">
           <thead><tr><th>ID</th><th>State</th><th>Class</th><th>Resource</th><th>Age</th><th></th></tr></thead>
           <tbody><tr v-for="a in acqs" :key="a.id" class="rowlink" @click="$nav('/acquisitions/' + a.id)">
-            <td class="id">{{ a.id }}</td>
+            <td class="id"><a :href="'#/acquisitions/' + a.id" @click.stop>{{ a.id }}</a></td>
             <td><op-badge v-if="a.state === 'failed' || a.state === 'expired'" :state="'failed'"></op-badge>
                 <span v-else class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' : 'var(--ph-provisioning)'}"></span>{{ a.state }}</span></td>
             <td>{{ a.class || '—' }}</td>
@@ -1066,7 +1112,7 @@
         <div v-else class="tbl-wrap"><table class="tbl">
           <thead><tr><th>Name</th><th>Kind</th><th>Provider</th><th>Source</th><th>Idle reclaim</th><th>Queue budget</th><th></th></tr></thead>
           <tbody><tr v-for="c in items" :key="c.metadata.name" class="rowlink" @click="detail = c">
-            <td><strong>{{ c.metadata.name }}</strong></td>
+            <td><strong><button type="button" class="linkish" @click.stop="detail = c">{{ c.metadata.name }}</button></strong></td>
             <td>{{ c.spec.kind }}</td>
             <td>{{ c.spec.provider }}</td>
             <td><span class="badge"><span class="dot" :style="{background: c.source === 'config' ? 'var(--muted)' : 'var(--accent)'}"></span>{{ c.source }}</span></td>
@@ -1163,7 +1209,7 @@
         <div class="grow"></div>
         <div class="pill-select" role="group" aria-label="Filter">
           <button v-for="f in ['all', 'verifying', 'uncertain']" :key="f"
-                  :class="{on: filter === f}" @click="filter = f">{{ f }}</button>
+                  :class="{on: filter === f}" :aria-pressed="filter === f" @click="filter = f">{{ f }}</button>
         </div></div>
       <div class="card">
         <div v-if="err" class="err-inline">{{ err }}</div>
