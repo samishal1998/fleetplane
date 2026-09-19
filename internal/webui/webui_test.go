@@ -69,3 +69,25 @@ func TestMissingAssetIs404(t *testing.T) {
 		t.Fatalf("GET /ui/nope.js = %d", rec.Code)
 	}
 }
+
+// The dashboard shipped three workarounds for endpoints that did not exist:
+// a browser-local acquisition list, pool members listed by class, and events
+// filtered client-side. The endpoints exist now, so the workarounds must not
+// come back — they were silently wrong (partial lists), not merely ugly.
+func TestUsesServerListings(t *testing.T) {
+	js := get(t, "/ui/app.js").Body.String()
+	for _, gone := range []string{"fp.acqs", "has no acquisition list", "listing by class"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still contains the workaround %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"'/v1/acquisitions'", "/v1/resources?pool=", "/v1/events?resource=",
+		"':pause'", "':resume'", "'DELETE', '/v1/pools/'",
+		"verb('undrain'", "verb('protect'", "verb('unprotect'",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js does not call %s", want)
+		}
+	}
+}

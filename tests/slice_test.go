@@ -165,7 +165,7 @@ func TestSlice_IdempotentCreateReplaysBytes(t *testing.T) {
 	}
 
 	c := apiclient.New(base, "")
-	list, err := c.ListResources(context.Background())
+	list, err := c.ListResources(context.Background(), apiclient.ResourceFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

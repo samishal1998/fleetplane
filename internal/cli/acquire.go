@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -158,4 +159,40 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// acquisitionsCmd answers "who is holding what right now" — the question the
+// dashboard could previously only guess at from browser-local history.
+func acquisitionsCmd(r *root) *cobra.Command {
+	var states []string
+	var resource string
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "acquisitions",
+		Short: "List acquisitions and the machines they hold",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if all {
+				states = []string{"pending", "provisioning", "bound", "failed", "released", "expired"}
+			}
+			list, err := r.client().ListAcquisitions(cmd.Context(), states, resource)
+			if err != nil {
+				return err
+			}
+			if r.output == "json" {
+				return printJSON(cmd, list)
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tSTATE\tCLASS\tRESOURCE\tLEASE\tACTOR\tAGE")
+			for _, a := range list.Items {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, a.State, a.Class,
+					a.ResourceID, a.LeaseID, a.Actor, time.Since(a.CreatedAt).Truncate(time.Second))
+			}
+			return w.Flush()
+		},
+	}
+	cmd.Flags().StringSliceVar(&states, "state", nil,
+		"only these states (repeatable); default: pending, provisioning, bound")
+	cmd.Flags().StringVar(&resource, "resource", "", "only acquisitions holding this resource id")
+	cmd.Flags().BoolVar(&all, "all", false, "include terminal states (failed, released, expired)")
+	return cmd
 }

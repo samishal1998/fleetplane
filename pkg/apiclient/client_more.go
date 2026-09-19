@@ -23,12 +23,61 @@ func (c *Client) GetAcquisition(ctx context.Context, id string) (*Acquisition, e
 	return &acq, nil
 }
 
+// ListAcquisitions lists acquisitions. Empty states means the live ones
+// (pending, provisioning, bound); resource narrows to one machine.
+func (c *Client) ListAcquisitions(ctx context.Context, states []string, resource string) (*AcquisitionList, error) {
+	q := url.Values{}
+	for _, s := range states {
+		q.Add("state", s)
+	}
+	if resource != "" {
+		q.Set("resource", resource)
+	}
+	var list AcquisitionList
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/acquisitions", q), nil, "", &list); err != nil {
+		return nil, err
+	}
+	return &list, nil
+}
+
 func (c *Client) Release(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/acquisitions/"+id, nil, "", nil)
 }
 
 func (c *Client) DrainResource(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/v1/resources/"+id+":drain", nil, "", nil)
+}
+
+func (c *Client) UndrainResource(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/resources/"+id+":undrain", nil, "", nil)
+}
+
+func (c *Client) ProtectResource(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/resources/"+id+":protect", nil, "", nil)
+}
+
+func (c *Client) UnprotectResource(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/resources/"+id+":unprotect", nil, "", nil)
+}
+
+func (c *Client) PausePool(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/pools/"+id+":pause", nil, "", nil)
+}
+
+func (c *Client) ResumePool(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/pools/"+id+":resume", nil, "", nil)
+}
+
+func (c *Client) DeletePool(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/pools/"+id, nil, "", nil)
+}
+
+// withQuery appends q to path when it has anything to say.
+func withQuery(path string, q url.Values) string {
+	if enc := q.Encode(); enc != "" {
+		return path + "?" + enc
+	}
+	return path
 }
 
 func (c *Client) ApplyPool(ctx context.Context, m PoolManifest) (*Pool, error) {
@@ -75,7 +124,9 @@ func (c *Client) ListOperations(ctx context.Context) ([]Operation, error) {
 	return out.Items, nil
 }
 
-func (c *Client) ListEvents(ctx context.Context, after, since string, limit int) ([]Event, error) {
+// ListEvents reads the audit log. resource narrows to one machine's events
+// server-side, which a client-side filter over a capped page cannot do.
+func (c *Client) ListEvents(ctx context.Context, after, since, resource string, limit int) ([]Event, error) {
 	q := url.Values{}
 	if after != "" {
 		q.Set("after", after)
@@ -83,15 +134,14 @@ func (c *Client) ListEvents(ctx context.Context, after, since string, limit int)
 	if since != "" {
 		q.Set("since", since)
 	}
+	if resource != "" {
+		q.Set("resource", resource)
+	}
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	path := "/v1/events"
-	if enc := q.Encode(); enc != "" {
-		path += "?" + enc
-	}
 	var out struct{ Items []Event }
-	if err := c.do(ctx, http.MethodGet, path, nil, "", &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/events", q), nil, "", &out); err != nil {
 		return nil, err
 	}
 	return out.Items, nil

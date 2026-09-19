@@ -43,7 +43,8 @@ func startAuthServer(t *testing.T) (base, adminTok, readTok, acquireTok string) 
 server: { addr: "127.0.0.1:0", opsAddr: "127.0.0.1:0", shutdownGrace: 2s }
 storage: { path: %s }
 providers:
-  fake-local: { driver: fake }
+  # park enabled: the parked tier is part of the surface these tests exercise.
+  fake-local: { driver: fake, settings: { park: true } }
 classes:
   ci-large:
     kind: compute.machine
@@ -153,6 +154,20 @@ func TestAuthz_RouteMatrix(t *testing.T) {
 	if code := doReq(t, "POST", base+"/v1/pools", acquireTok, []byte(`{}`)); code != http.StatusForbidden {
 		t.Fatalf("ci pool write: %d, want 403", code)
 	}
+	// The new verbs carry the right permissions: reads stay open to the
+	// reader, pool/resource mutations do not leak to narrower tokens.
+	if code := doReq(t, "GET", base+"/v1/acquisitions", readTok, nil); code != http.StatusOK {
+		t.Fatalf("reader list acquisitions: %d, want 200", code)
+	}
+	if code := doReq(t, "POST", base+"/v1/resources/res_x:protect", readTok, nil); code != http.StatusForbidden {
+		t.Fatalf("reader protect: %d, want 403", code)
+	}
+	if code := doReq(t, "POST", base+"/v1/pools/pool_x:pause", acquireTok, nil); code != http.StatusForbidden {
+		t.Fatalf("ci pause: %d, want 403", code)
+	}
+	if code := doReq(t, "DELETE", base+"/v1/pools/pool_x", acquireTok, nil); code != http.StatusForbidden {
+		t.Fatalf("ci pool delete: %d, want 403", code)
+	}
 	// Admin implies everything.
 	if code := doReq(t, "POST", base+"/v1/pools", adminTok, []byte(`{"metadata":{"name":"p1"},"spec":{"class":"ci-large","replicas":0}}`)); code != http.StatusOK {
 		t.Fatalf("admin pool write: %d, want 200", code)
@@ -202,7 +217,7 @@ func TestHTTP_AcquireLifecycle(t *testing.T) {
 	if err != nil || got2.State != "bound" {
 		t.Fatalf("second acquire: %+v %v", got2, err)
 	}
-	list, err := c.ListResources(ctx)
+	list, err := c.ListResources(ctx, apiclient.ResourceFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

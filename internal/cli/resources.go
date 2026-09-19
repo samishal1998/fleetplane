@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,11 +14,12 @@ import (
 )
 
 func resourcesCmd(r *root) *cobra.Command {
+	var filter apiclient.ResourceFilter
 	cmd := &cobra.Command{
 		Use:   "resources",
 		Short: "List and manage resources",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			list, err := r.client().ListResources(cmd.Context())
+			list, err := r.client().ListResources(cmd.Context(), filter)
 			if err != nil {
 				return err
 			}
@@ -34,6 +36,12 @@ func resourcesCmd(r *root) *cobra.Command {
 			return w.Flush()
 		},
 	}
+
+	cmd.Flags().StringVar(&filter.Kind, "kind", "", "only this resource kind")
+	cmd.Flags().StringVar(&filter.Class, "class", "", "only resources of this class")
+	cmd.Flags().StringVar(&filter.Provider, "provider", "", "only this provider instance")
+	cmd.Flags().StringVar(&filter.Pool, "pool", "", "only members of this pool id")
+	cmd.Flags().StringSliceVar(&filter.Phases, "phase", nil, "only these phases (repeatable)")
 
 	get := &cobra.Command{
 		Use:   "get ID",
@@ -152,45 +160,40 @@ with a specific cloud-init file as user data.`,
 	create.Flags().StringVar(&cUserDataFile, "user-data-file", "", "file whose content becomes the machine's user data (cloud-init)")
 	create.Flags().StringSliceVar(&cLabels, "label", nil, "machine label key=value (repeatable)")
 
-	drain := &cobra.Command{
-		Use:   "drain ID",
-		Short: "Drain a resource: no new leases; deleted once existing leases end",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := r.client().DrainResource(cmd.Context(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: draining\n", args[0])
-			return nil
-		},
+	verbs := []*cobra.Command{
+		resourceVerb(r, "drain", "Drain a resource: no new leases; deleted once existing leases end",
+			"draining", (*apiclient.Client).DrainResource),
+		resourceVerb(r, "undrain", "Return a draining resource to service (undo an accidental drain)",
+			"ready", (*apiclient.Client).UndrainResource),
+		resourceVerb(r, "park", "Stop a ready machine into the near-free parked tier (docs/12)",
+			"parking", (*apiclient.Client).ParkResource),
+		resourceVerb(r, "start", "Start a parked machine back into service",
+			"starting", (*apiclient.Client).StartResource),
+		resourceVerb(r, "protect", "Protect a resource from deletion, parking and idle reclaim",
+			"protected", (*apiclient.Client).ProtectResource),
+		resourceVerb(r, "unprotect", "Lift deletion protection",
+			"unprotected", (*apiclient.Client).UnprotectResource),
 	}
 
-	park := &cobra.Command{
-		Use:   "park ID",
-		Short: "Stop a ready machine into the near-free parked tier (docs/12)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := r.client().ParkResource(cmd.Context(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: parking\n", args[0])
-			return nil
-		},
-	}
-	start := &cobra.Command{
-		Use:   "start ID",
-		Short: "Start a parked machine back into service",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := r.client().StartResource(cmd.Context(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: starting\n", args[0])
-			return nil
-		},
-	}
-	cmd.AddCommand(get, del, create, drain, park, start)
+	cmd.AddCommand(append([]*cobra.Command{get, del, create}, verbs...)...)
 	return cmd
+}
+
+// resourceVerb builds the one-argument verbs (resources and pools alike),
+// which differ only in the call they make and the word they echo.
+func resourceVerb(r *root, use, short, done string, act func(*apiclient.Client, context.Context, string) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use + " ID",
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := act(r.client(), cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", args[0], done)
+			return nil
+		},
+	}
 }
 
 func printJSON(cmd *cobra.Command, v any) error {

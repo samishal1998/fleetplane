@@ -37,11 +37,11 @@ requires `provider.admin`.
 |---|---|---|
 | Overview | Stat tiles (resources, provisioning, **parked**, active + uncertain operations, pools, provider health), fleet-by-phase distribution, recent events | — |
 | Resources | All live resources with phase, class, provider, external ID | Create (kind, provider, spec JSON, labels), open detail |
-| Resource detail | Metadata, spec, capacity, provider extensions (verbatim, invariant 6), open operations, events, "Parked since" while parked | Park (shown on `ready` machines), Start (shown on `parked` machines), drain, delete (dry-run preview first, then journaled delete) |
+| Resource detail | Metadata, spec, capacity, provider extensions (verbatim, invariant 6), open operations, events, "Parked since" while parked | Park (shown on `ready` machines), Start (shown on `parked` machines), drain, undrain (shown on `draining` machines), protect / unprotect, delete (dry-run preview first, then journaled delete) |
 | Pools | Declared pools with class, replicas, minReady | Create pool |
-| Pool detail | Spec, generation, resources in the pool's class | Scale replicas (±), edit spec JSON, reconcile now |
+| Pool detail | Spec, generation, the pool's member resources | Scale replicas (±), edit spec JSON, reconcile now, pause / resume, delete pool |
 | Classes | All classes (config + api) with kind, provider, source, policies | Create class (template validated on submit; policy fields: idle reclaim, park, delete-after-parked, queue budget), delete api-managed classes, view template |
-| Acquisitions | Acquisitions created from this browser (the API has no list endpoint), lookup by ID | Acquire (class, TTL, constraints, exclusive), release |
+| Acquisitions | Live acquisitions (`pending`, `provisioning`, `bound`) with a Live/All toggle, lookup by ID | Acquire (class, TTL, constraints, exclusive), release |
 | Operations | **Open** (non-terminal) operations; terminal ones are visible in events | Resolve uncertain operations (`retry-verification` / `mark-failed`) |
 | Events | Recent events, newest first, free-text filter | — |
 | Providers | Per-instance health (state, last check, consecutive failures, last error) | — |
@@ -59,6 +59,14 @@ Notes that follow from the API's semantics:
   detail view keeps refreshing while the machine transits `parking`/`starting`.
   The three warm-tier phases have their own colors in the phase distribution
   and phase badges.
+- **The acquisitions list is live-only** by default, matching
+  [`GET /v1/acquisitions`](api.md#query-parameters): acquisitions are never
+  garbage collected, so an unfiltered listing would be the control plane's
+  entire history. The **All** toggle asks for the terminal states explicitly.
+- **Pause and delete a pool** call `POST …:pause` / `…:resume` and
+  `DELETE /v1/pools/{id}`. A paused pool converges for nothing until it is
+  resumed, so its **Reconcile now** fails with a conflict; deleting one is
+  refused while it still wants replicas or still has members.
 - **The operations list is open-only** by design ([`GET /v1/operations`](api.md)
   returns non-terminal operations); completed operations are audited through
   events and `GET /v1/operations/{id}`.

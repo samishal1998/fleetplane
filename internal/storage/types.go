@@ -90,6 +90,15 @@ const (
 	AcqExpired      AcqState = "expired"
 )
 
+// ValidAcqState reports whether s is a known acquisition state.
+func ValidAcqState(s AcqState) bool {
+	switch s {
+	case AcqPending, AcqProvisioning, AcqBound, AcqFailed, AcqReleased, AcqExpired:
+		return true
+	}
+	return false
+}
+
 // Resource is the persisted resource record (02 §4). Extension and Capacity
 // are stored verbatim (invariant 6). Times are unix-millis UTC.
 type Resource struct {

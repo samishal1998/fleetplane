@@ -222,7 +222,7 @@ your workstation:
 printf 'HETZNER_TOKEN=%s\n' "$HETZNER_TOKEN" > secrets.env
 
 fleetplane cloud-init --config config.yaml --env secrets.env \
-  --distro ubuntu --version v0.7.0 --out user-data.yaml
+  --distro ubuntu --version v0.8.0 --out user-data.yaml
 # token (admin, shown once): flp_8f3a1c2d.Zkw3vWQx…    ← printed to stderr
 ```
 

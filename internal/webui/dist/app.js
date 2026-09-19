@@ -109,6 +109,9 @@
   // Fixed phase → color-token mapping (identity is always color + text).
   const PHASES = ['provisioning', 'starting', 'ready', 'allocated', 'parking', 'parked', 'draining', 'deleting', 'failed', 'orphaned', 'unknown'];
   function phaseVar(p) { return PHASES.includes(p) ? '--ph-' + p : '--muted'; }
+  // /v1/acquisitions defaults to the live states; asking for every one is how
+  // the "All" toggle reaches the history, which is never garbage collected.
+  const ACQ_STATES = ['pending', 'provisioning', 'bound', 'failed', 'released', 'expired'];
   function opToneVar(s) {
     if (s === 'succeeded') return '--st-good';
     if (s === 'failed' || s === 'aborted') return '--st-critical';
@@ -121,6 +124,12 @@
     if (s === 'degraded') return '--st-warn';
     if (s === 'unavailable') return '--st-critical';
     return '--muted';
+  }
+  function acqToneVar(s) {
+    if (s === 'bound') return '--st-good';
+    if (s === 'failed' || s === 'expired') return '--st-critical';
+    if (s === 'released') return '--muted';
+    return '--ph-provisioning'; // pending / provisioning: still working
   }
   const OP_ACTIVE = ['journaled', 'in_flight', 'external_accepted', 'verifying', 'uncertain'];
 
@@ -136,13 +145,6 @@
     events: 'M3 12h4l3 8 4-16 3 8h4',
     providers: 'M6.5 18a4 4 0 010-8 6 6 0 0111.4 1.9A3.5 3.5 0 1117.5 18z',
   };
-
-  function rememberAcq(id) {
-    const l = JSON.parse(localStorage.getItem('fp.acqs') || '[]');
-    if (!l.includes(id)) l.unshift(id);
-    localStorage.setItem('fp.acqs', JSON.stringify(l.slice(0, 50)));
-  }
-  function rememberedAcqs() { return JSON.parse(localStorage.getItem('fp.acqs') || '[]'); }
 
   function loadErr(e) {
     if (e.status === 403) return 'This token lacks the permission needed for this view (' + e.message + ').';
@@ -299,6 +301,12 @@
     props: ['state'],
     template: `<span class="badge"><span class="dot" :style="{background: 'var(' + v + ')'}"></span>{{ state }}</span>`,
     computed: { v() { return healthToneVar(this.state); } },
+  });
+
+  app.component('acq-badge', {
+    props: ['state'],
+    template: `<span class="badge"><span class="dot" :style="{background: 'var(' + v + ')'}"></span>{{ state }}</span>`,
+    computed: { v() { return acqToneVar(this.state); } },
   });
 
   app.component('modal-box', {
@@ -599,9 +607,8 @@
           this.ops = (ops.items || []).filter((o) => o.resourceId === this.id);
         } catch (e) { /* section is optional */ }
         try {
-          const ev = await api('GET', '/v1/events?limit=200');
-          this.events = (ev.items || []).filter((e2) => e2.resourceId === this.id)
-            .sort((a, b) => (a.ts < b.ts ? 1 : -1)).slice(0, 20);
+          const ev = await api('GET', '/v1/events?resource=' + encodeURIComponent(this.id) + '&limit=200');
+          this.events = (ev.items || []).sort((a, b) => (a.ts < b.ts ? 1 : -1)).slice(0, 20);
         } catch (e) { /* optional */ }
         this.loading = false;
       },
@@ -621,23 +628,10 @@
           this.confirmDelete = false;
         } catch (e) { toastErr(e); } finally { this.busy = false; }
       },
-      async drain() {
+      async verb(name, said) {
         try {
-          await api('POST', '/v1/resources/' + this.id + ':drain');
-          toast('Draining ' + this.id);
-        } catch (e) { toastErr(e); }
-      },
-      async park() {
-        try {
-          await api('POST', '/v1/resources/' + this.id + ':park');
-          toast('Parking ' + this.id);
-          this.load(true);
-        } catch (e) { toastErr(e); }
-      },
-      async startUp() {
-        try {
-          await api('POST', '/v1/resources/' + this.id + ':start');
-          toast('Starting ' + this.id);
+          await api('POST', '/v1/resources/' + this.id + ':' + name);
+          toast(said + ' ' + this.id);
           this.load(true);
         } catch (e) { toastErr(e); }
       },
@@ -648,10 +642,15 @@
         <h1><a href="#/resources">Resources</a> / <span class="mono">{{ id }}</span></h1>
         <div class="grow"></div>
         <template v-if="r && !r.metadata.deletedAt">
-          <button v-if="r.status.phase === 'ready'" class="btn" @click="park" :disabled="busy"
+          <button v-if="r.status.phase === 'ready'" class="btn" @click="verb('park', 'Parking')" :disabled="busy"
                   title="Stop into the near-free parked tier">Park</button>
-          <button v-if="r.status.phase === 'parked'" class="btn primary" @click="startUp" :disabled="busy">Start</button>
-          <button class="btn" @click="drain" :disabled="busy">Drain</button>
+          <button v-if="r.status.phase === 'parked'" class="btn primary" @click="verb('start', 'Starting')" :disabled="busy">Start</button>
+          <button v-if="r.status.phase === 'draining'" class="btn" @click="verb('undrain', 'Undraining')" :disabled="busy"
+                  title="Back to ready — the reconciler will drain it again if the pool is still over target">Undrain</button>
+          <button v-else class="btn" @click="verb('drain', 'Draining')" :disabled="busy">Drain</button>
+          <button v-if="r.metadata.protected" class="btn" @click="verb('unprotect', 'Unprotected')" :disabled="busy">Unprotect</button>
+          <button v-else class="btn" @click="verb('protect', 'Protected')" :disabled="busy"
+                  title="Block deletion, parking, exclusive scheduling and idle reclaim">Protect</button>
           <button class="btn danger" @click="askDelete" :disabled="busy || r.metadata.protected"
                   :title="r.metadata.protected ? 'delete-protected' : ''">Delete…</button>
         </template>
@@ -754,14 +753,14 @@
         <div v-if="err" class="err-inline">{{ err }}</div>
         <div v-else-if="!items.length && !loading" class="empty">No pools declared.</div>
         <div v-else class="tbl-wrap"><table class="tbl">
-          <thead><tr><th>Name / ID</th><th>Class</th><th>Replicas</th><th>Min ready</th><th>Paused</th><th>Updated</th></tr></thead>
+          <thead><tr><th>Name / ID</th><th>Class</th><th>Replicas</th><th>Min ready</th><th>Status</th><th>Updated</th></tr></thead>
           <tbody><tr v-for="p in items" :key="p.metadata.id" class="rowlink" @click="$nav('/pools/' + p.metadata.id)">
             <td><strong><a :href="'#/pools/' + p.metadata.id" @click.stop>{{ p.metadata.name || p.metadata.id }}</a></strong>
               <div v-if="p.metadata.name && p.metadata.name !== p.metadata.id" class="id sub">{{ p.metadata.id }}</div></td>
             <td>{{ specOf(p).class || (specOf(p).kind || '—') }}</td>
             <td class="num">{{ specOf(p).replicas }}</td>
             <td class="num">{{ specOf(p).minReady || 0 }}</td>
-            <td>{{ p.paused ? 'yes' : 'no' }}</td>
+            <td><span class="badge"><span class="dot" :style="{background: p.paused ? 'var(--st-warn)' : 'var(--st-good)'}"></span>{{ p.paused ? 'paused' : 'running' }}</span></td>
             <td class="sub" :title="$time(p.metadata.updatedAt)">{{ $ago(p.metadata.updatedAt) }}</td>
           </tr></tbody></table></div>
       </div>
@@ -786,7 +785,10 @@
   app.component('pool-detail', {
     mixins: [polls],
     data() {
-      return { id: store.route.id, p: null, members: [], showEdit: false, editSpec: '', formErr: '', busy: false };
+      return {
+        id: store.route.id, p: null, members: [], showEdit: false, editSpec: '',
+        confirmDelete: false, delErr: '', formErr: '', busy: false,
+      };
     },
     computed: {
       spec() { if (!this.p) return {}; try { return typeof this.p.spec === 'string' ? JSON.parse(this.p.spec) : this.p.spec; } catch (e) { return {}; } },
@@ -795,12 +797,10 @@
       async load() {
         try { this.p = await api('GET', '/v1/pools/' + this.id); this.err = ''; }
         catch (e) { this.err = loadErr(e); this.loading = false; return; }
-        if (this.spec.class) {
-          try {
-            const d = await api('GET', '/v1/resources?class=' + encodeURIComponent(this.spec.class));
-            this.members = (d.items || []).filter((r) => !r.metadata.deletedAt);
-          } catch (e) { /* optional */ }
-        }
+        try {
+          const d = await api('GET', '/v1/resources?pool=' + encodeURIComponent(this.id));
+          this.members = (d.items || []).filter((r) => !r.metadata.deletedAt);
+        } catch (e) { /* optional */ }
         this.loading = false;
       },
       openEdit() {
@@ -831,14 +831,35 @@
         try { await api('POST', '/v1/pools/' + this.id + ':reconcile'); toast('Reconcile kicked'); }
         catch (e) { toastErr(e); }
       },
+      async setPaused(paused) {
+        try {
+          await api('POST', '/v1/pools/' + this.id + (paused ? ':pause' : ':resume'));
+          toast('Pool ' + (paused ? 'paused' : 'resumed'));
+          this.load(true);
+        } catch (e) { toastErr(e); }
+      },
+      async doDelete() {
+        this.busy = true;
+        try {
+          await api('DELETE', '/v1/pools/' + this.id);
+          toast('Pool ' + this.id + ' deleted');
+          nav('/pools'); // the poll would otherwise 404 on the row we just removed
+        } catch (e) { this.delErr = e.message; } finally { this.busy = false; }
+      },
     },
     template: `
     <div>
       <div class="topbar">
         <h1><a href="#/pools">Pools</a> / {{ p ? p.metadata.name : id }}</h1>
         <div class="grow"></div>
-        <button class="btn" @click="reconcile">Reconcile now</button>
-        <button class="btn" @click="openEdit">Edit spec</button>
+        <template v-if="p">
+          <button class="btn" @click="reconcile">Reconcile now</button>
+          <button v-if="p.paused" class="btn primary" @click="setPaused(false)">Resume</button>
+          <button v-else class="btn" @click="setPaused(true)"
+                  title="Freeze convergence: no creates, drains or reclaim until resumed">Pause</button>
+          <button class="btn" @click="openEdit">Edit spec</button>
+          <button class="btn danger" @click="confirmDelete = true; delErr = ''">Delete pool…</button>
+        </template>
       </div>
       <div v-if="err" class="card err-inline">{{ err }}</div>
       <template v-else-if="p">
@@ -846,17 +867,17 @@
           <div class="tile"><div class="t-label">Desired replicas</div><div class="t-value">{{ spec.replicas || 0 }}</div>
             <div class="t-actions btn-row"><button class="btn sm" @click="scale(-1)" :disabled="busy || !spec.replicas" aria-label="Scale down">−</button>
               <button class="btn sm" @click="scale(1)" :disabled="busy" aria-label="Scale up">+</button></div></div>
-          <div class="tile"><div class="t-label">In class</div><div class="t-value">{{ members.length }}</div>
+          <div class="tile"><div class="t-label">Members</div><div class="t-value">{{ members.length }}</div>
             <div class="t-sub">{{ spec.class ? 'class ' + spec.class : 'inline spec' }}</div></div>
-          <div class="tile"><div class="t-label">Paused</div><div class="t-value">{{ p.paused ? 'yes' : 'no' }}</div></div>
+          <div class="tile"><div class="t-label">Status</div><div class="t-value">{{ p.paused ? 'paused' : 'running' }}</div>
+            <div class="t-sub">{{ p.paused ? 'convergence frozen' : 'converging to spec' }}</div></div>
           <div class="tile"><div class="t-label">Generation</div><div class="t-value">{{ p.metadata.generation }}</div>
             <div class="t-sub">observed {{ p.metadata.observedGeneration }}</div></div>
         </div>
         <div class="card section"><h2>Spec</h2><json-view :value="p.spec"></json-view></div>
         <div class="card section">
-          <h2>Resources in this class</h2>
-          <div v-if="!spec.class" class="empty">Pool uses an inline spec; member listing by class is unavailable.</div>
-          <div v-else-if="!members.length" class="empty">No live resources in class {{ spec.class }}.</div>
+          <h2>Members</h2>
+          <div v-if="!members.length" class="empty">No member resources — the reconciler creates them to meet the replica count.</div>
           <div v-else class="tbl-wrap"><table class="tbl">
             <thead><tr><th>Name / ID</th><th>Phase</th><th>Provider</th><th>External ID</th><th>Age</th></tr></thead>
             <tbody><tr v-for="r in members" :key="r.metadata.id" class="rowlink" @click="$nav('/resources/' + r.metadata.id)">
@@ -869,6 +890,16 @@
             </tr></tbody></table></div>
         </div>
       </template>
+
+      <modal-box v-if="confirmDelete" title="Delete pool" @close="confirmDelete = false">
+        <p>Removes the pool declaration. The server refuses while the pool still wants replicas
+        or still has members, and re-checks both as it deletes.</p>
+        <div v-if="delErr" class="field-err" role="alert">{{ delErr }}</div>
+        <div class="actions">
+          <button class="btn" @click="confirmDelete = false">Cancel</button>
+          <button class="btn danger" @click="doDelete" :disabled="busy"><span v-if="busy" class="wip"></span> Delete {{ p.metadata.name || id }}</button>
+        </div>
+      </modal-box>
 
       <modal-box v-if="showEdit" title="Edit pool spec" @close="showEdit = false">
         <form @submit.prevent="submitEdit">
@@ -889,7 +920,7 @@
     mixins: [polls],
     data() {
       return {
-        acqs: [], lookup: '', classNames: [], showAcquire: false, busy: false, formErr: '',
+        acqs: [], showAll: false, lookup: '', classNames: [], showAcquire: false, busy: false, formErr: '',
         form: { class: '', kind: '', exclusive: false, ttl: '', maxWait: '', constraints: '' },
         idem: uuid(),
       };
@@ -900,13 +931,12 @@
           const cl = await api('GET', '/v1/classes');
           this.classNames = (cl.items || []).map((c) => c.metadata.name);
         } catch (e) { /* datalist is best-effort */ }
-        const ids = rememberedAcqs();
-        const out = [];
-        for (const id of ids.slice(0, 20)) {
-          try { out.push(await api('GET', '/v1/acquisitions/' + id)); }
-          catch (e) { if (e.status === 403) { this.err = loadErr(e); break; } }
-        }
-        this.acqs = out;
+        const q = this.showAll ? '?' + ACQ_STATES.map((st) => 'state=' + st).join('&') : '';
+        try {
+          const d = await api('GET', '/v1/acquisitions' + q);
+          this.acqs = (d.items || []).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+          this.err = '';
+        } catch (e) { this.err = loadErr(e); }
         this.loading = false;
       },
       go() { if (this.lookup.trim()) nav('/acquisitions/' + this.lookup.trim()); },
@@ -926,7 +956,6 @@
         this.busy = true;
         try {
           const a = await api('POST', '/v1/acquisitions', body, { 'Idempotency-Key': this.idem });
-          rememberAcq(a.id);
           toast('Acquisition ' + a.id + ' → ' + a.state);
           this.showAcquire = false;
           nav('/acquisitions/' + a.id);
@@ -935,26 +964,33 @@
     },
     template: `
     <div>
-      <div class="topbar"><h1>Acquisitions</h1><div class="grow"></div>
+      <div class="topbar"><h1>Acquisitions</h1>
+        <span class="muted small">Who is holding what right now</span>
+        <div class="grow"></div>
+        <div class="pill-select" role="group" aria-label="States">
+          <button :class="{on: !showAll}" :aria-pressed="!showAll" @click="showAll = false; load(true)">Live</button>
+          <button :class="{on: showAll}" :aria-pressed="showAll" @click="showAll = true; load(true)">All</button>
+        </div>
         <button class="btn primary" @click="openAcquire">Acquire capacity</button></div>
       <div class="card">
         <div class="btn-row">
           <input type="text" v-model="lookup" placeholder="acq_… look up by ID" style="max-width:320px"
-                 @keyup.enter="go" class="mono">
+                 @keyup.enter="go" class="mono" aria-label="Acquisition ID">
           <button class="btn" @click="go">Open</button>
-          <span class="muted small">The API has no acquisition list; shown below are ones created from this browser.</span>
         </div>
         <div v-if="err" class="err-inline mt">{{ err }}</div>
-        <div v-else-if="!acqs.length && !loading" class="empty">Nothing acquired from this browser yet.</div>
+        <div v-else-if="!acqs.length && !loading" class="empty">{{ showAll ?
+          'No acquisitions yet — acquire capacity to bind a machine to a caller.' :
+          'No live acquisitions — nothing is holding capacity. Switch to All for released and expired ones.' }}</div>
         <div v-else class="tbl-wrap mt"><table class="tbl">
-          <thead><tr><th>ID</th><th>State</th><th>Class</th><th>Resource</th><th>Age</th><th></th></tr></thead>
+          <thead><tr><th>ID</th><th>State</th><th>Class</th><th>Resource</th><th>Actor</th><th>Age</th></tr></thead>
           <tbody><tr v-for="a in acqs" :key="a.id" class="rowlink" @click="$nav('/acquisitions/' + a.id)">
             <td class="id"><a :href="'#/acquisitions/' + a.id" @click.stop>{{ a.id }}</a></td>
-            <td><op-badge v-if="a.state === 'failed' || a.state === 'expired'" :state="'failed'"></op-badge>
-                <span v-else class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' : 'var(--ph-provisioning)'}"></span>{{ a.state }}</span></td>
+            <td><acq-badge :state="a.state"></acq-badge></td>
             <td>{{ a.class || '—' }}</td>
-            <td class="id"><a v-if="a.resourceId" :href="'#/resources/' + a.resourceId" @click.stop>{{ a.resourceId }}</a></td>
-            <td class="sub">{{ $ago(a.createdAt) }}</td><td></td>
+            <td class="id"><a v-if="a.resourceId" :href="'#/resources/' + a.resourceId" @click.stop>{{ a.resourceId }}</a><span v-else>—</span></td>
+            <td class="sub">{{ a.actor || '—' }}</td>
+            <td class="sub" :title="$time(a.createdAt)">{{ $ago(a.createdAt) }}</td>
           </tr></tbody></table></div>
       </div>
 
@@ -987,7 +1023,7 @@
     data() { return { id: store.route.id, a: null, busy: false }; },
     methods: {
       async load() {
-        try { this.a = await api('GET', '/v1/acquisitions/' + this.id); this.err = ''; rememberAcq(this.id); }
+        try { this.a = await api('GET', '/v1/acquisitions/' + this.id); this.err = ''; }
         catch (e) { this.err = loadErr(e); }
         this.loading = false;
       },
@@ -1011,10 +1047,7 @@
       <div v-if="err" class="card err-inline">{{ err }}</div>
       <div v-else-if="a" class="card">
         <dl class="kv">
-          <dt>State</dt><dd>
-            <span class="badge"><span class="dot" :style="{background: a.state === 'bound' ? 'var(--st-good)' :
-              (a.state === 'failed' || a.state === 'expired' ? 'var(--st-critical)' : 'var(--ph-provisioning)')}"></span>
-              {{ a.state }}</span>
+          <dt>State</dt><dd><acq-badge :state="a.state"></acq-badge>
             <span v-if="a.state === 'pending' || a.state === 'provisioning'" class="wip" style="margin-left:8px"></span></dd>
           <dt>Class</dt><dd>{{ a.class || '—' }}</dd>
           <dt>Resource kind</dt><dd>{{ a.resourceKind || '—' }}</dd>

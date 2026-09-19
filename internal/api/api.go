@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/samishal1998/fleetplane/internal/app"
+	"github.com/samishal1998/fleetplane/internal/phase"
 	"github.com/samishal1998/fleetplane/internal/provision"
 	"github.com/samishal1998/fleetplane/internal/storage"
 	"github.com/samishal1998/fleetplane/pkg/apiclient"
@@ -92,12 +93,26 @@ func (s *Server) getResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	f := storage.ResourceFilter{
-		Kind:  r.URL.Query().Get("kind"),
-		Class: r.URL.Query().Get("class"),
+		Kind:  q.Get("kind"),
+		Class: q.Get("class"),
 	}
-	if p := r.URL.Query().Get("provider"); p != "" {
+	if p := q.Get("provider"); p != "" {
 		f.Provider = storage.ProviderInstance(p)
+	}
+	if p := q.Get("pool"); p != "" {
+		pid := storage.PoolID(p)
+		f.PoolID = &pid
+	}
+	for _, p := range q["phase"] {
+		ph := phase.Phase(p)
+		if !phase.Valid(ph) {
+			writeError(w, w.Header().Get("X-Request-Id"), http.StatusBadRequest, "invalid",
+				"unknown phase "+p, false)
+			return
+		}
+		f.Phases = append(f.Phases, ph)
 	}
 	items, err := s.app.ListResources(r.Context(), f)
 	if err != nil {
@@ -151,6 +166,37 @@ func (s *Server) parkResource(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startResource(w http.ResponseWriter, r *http.Request) {
 	s.parkStart(w, r, s.app.StartResource, "starting")
+}
+
+func (s *Server) undrainResource(w http.ResponseWriter, r *http.Request) {
+	s.syncVerb(w, r, s.app.UndrainResource, "ready")
+}
+
+func (s *Server) protectResource(w http.ResponseWriter, r *http.Request) {
+	s.syncVerb(w, r, s.setProtected(true), "protected")
+}
+
+func (s *Server) unprotectResource(w http.ResponseWriter, r *http.Request) {
+	s.syncVerb(w, r, s.setProtected(false), "unprotected")
+}
+
+func (s *Server) setProtected(on bool) func(context.Context, string, string) error {
+	return func(ctx context.Context, id, actor string) error {
+		return s.app.SetResourceProtected(ctx, id, on, actor)
+	}
+}
+
+// syncVerb serves the verbs that finish inside the request. Unlike the
+// journalled ones there is nothing left in flight when the call returns, so
+// the status is 200 rather than 202. ErrAlreadyThere is 200 too: asking for
+// a state the object is already in is success, not a conflict.
+func (s *Server) syncVerb(w http.ResponseWriter, r *http.Request, act func(context.Context, string, string) error, status string) {
+	id := r.PathValue("id")
+	if err := act(r.Context(), id, principalOf(r).Name); err != nil && !errors.Is(err, app.ErrAlreadyThere) {
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": status})
 }
 
 // parkStart implements the idempotent status matrix (docs/12): 202 on a

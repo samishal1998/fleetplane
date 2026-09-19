@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -88,6 +89,35 @@ func (s *Server) getAcquisition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toAcqEnvelope(acq))
+}
+
+// listAcquisitions answers "who is holding what right now". Without ?state it
+// returns the live ones only — acquisitions are never garbage collected, so
+// the unfiltered listing is the control plane's whole history.
+func (s *Server) listAcquisitions(w http.ResponseWriter, r *http.Request) {
+	var states []storage.AcqState
+	for _, v := range r.URL.Query()["state"] {
+		st := storage.AcqState(v)
+		if !storage.ValidAcqState(st) {
+			writeError(w, w.Header().Get("X-Request-Id"), http.StatusBadRequest, "invalid",
+				"unknown acquisition state "+v, false)
+			return
+		}
+		states = append(states, st)
+	}
+	acqs, err := s.app.ListAcquisitions(r.Context(), states, r.URL.Query().Get("resource"))
+	if err != nil {
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+		return
+	}
+	out := apiclient.AcquisitionList{
+		APIVersion: apiclient.APIVersion, Kind: "AcquisitionList",
+		Items: []apiclient.Acquisition{},
+	}
+	for _, a := range acqs {
+		out.Items = append(out.Items, toAcqEnvelope(a))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) releaseAcquisition(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +205,29 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.app.DeletePool(r.Context(), id, principalOf(r).Name); err != nil {
+		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "deleted"})
+}
+
+func (s *Server) pausePool(w http.ResponseWriter, r *http.Request) {
+	s.syncVerb(w, r, s.setPoolPaused(true), "paused")
+}
+
+func (s *Server) resumePool(w http.ResponseWriter, r *http.Request) {
+	s.syncVerb(w, r, s.setPoolPaused(false), "running")
+}
+
+func (s *Server) setPoolPaused(on bool) func(context.Context, string, string) error {
+	return func(ctx context.Context, id, actor string) error {
+		return s.app.SetPoolPaused(ctx, id, on, actor)
+	}
+}
+
 func (s *Server) reconcilePool(w http.ResponseWriter, r *http.Request) {
 	if err := s.app.ReconcilePool(r.Context(), r.PathValue("id")); err != nil {
 		s.writeAppError(w, w.Header().Get("X-Request-Id"), err)
@@ -260,6 +313,10 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.SinceTS = time.Now().Add(-d).UnixMilli()
+	}
+	if res := r.URL.Query().Get("resource"); res != "" {
+		rid := storage.ResourceID(res)
+		f.ResourceID = &rid
 	}
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {

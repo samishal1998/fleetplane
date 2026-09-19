@@ -233,6 +233,12 @@ func (rs resourceStore) SetLastLeaseEnded(ctx context.Context, id storage.Resour
 		atMillis, atMillis, string(id))
 }
 
+func (rs resourceStore) SetDeleteProtected(ctx context.Context, id storage.ResourceID, protected bool, atMillis int64) error {
+	return rs.execOne(ctx,
+		`UPDATE resources SET delete_protected=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
+		boolInt(protected), atMillis, string(id))
+}
+
 func (rs resourceStore) MarkDeleted(ctx context.Context, id storage.ResourceID, atMillis int64) error {
 	return rs.execOne(ctx,
 		`UPDATE resources SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,

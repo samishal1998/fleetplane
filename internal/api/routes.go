@@ -22,6 +22,7 @@ type RouteDef struct {
 func (s *Server) Routes() []RouteDef {
 	return []RouteDef{
 		{Method: "POST", Pattern: "/v1/acquisitions", SpecPath: "/v1/acquisitions", Perm: PermResourceAcquire, Mutating: true, handler: s.createAcquisition},
+		{Method: "GET", Pattern: "/v1/acquisitions", SpecPath: "/v1/acquisitions", Perm: PermResourceRead, handler: s.listAcquisitions},
 		{Method: "GET", Pattern: "/v1/acquisitions/{id}", SpecPath: "/v1/acquisitions/{id}", Perm: PermResourceRead, handler: s.getAcquisition},
 		{Method: "DELETE", Pattern: "/v1/acquisitions/{id}", SpecPath: "/v1/acquisitions/{id}", Perm: PermResourceAcquire, Mutating: true, handler: s.releaseAcquisition},
 
@@ -32,12 +33,18 @@ func (s *Server) Routes() []RouteDef {
 		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "drain", SpecPath: "/v1/resources/{id}:drain", Perm: PermResourceDelete, Mutating: true, handler: s.drainResource},
 		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "park", SpecPath: "/v1/resources/{id}:park", Perm: PermResourceDelete, Mutating: true, handler: s.parkResource},
 		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "start", SpecPath: "/v1/resources/{id}:start", Perm: PermResourceCreate, Mutating: true, handler: s.startResource},
+		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "undrain", SpecPath: "/v1/resources/{id}:undrain", Perm: PermResourceDelete, Mutating: true, handler: s.undrainResource},
+		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "protect", SpecPath: "/v1/resources/{id}:protect", Perm: PermResourceDelete, Mutating: true, handler: s.protectResource},
+		{Method: "POST", Pattern: "/v1/resources/{idverb}", Verb: "unprotect", SpecPath: "/v1/resources/{id}:unprotect", Perm: PermResourceDelete, Mutating: true, handler: s.unprotectResource},
 
 		{Method: "POST", Pattern: "/v1/pools", SpecPath: "/v1/pools", Perm: PermPoolWrite, Mutating: true, handler: s.createPool},
 		{Method: "GET", Pattern: "/v1/pools", SpecPath: "/v1/pools", Perm: PermPoolRead, handler: s.listPools},
 		{Method: "GET", Pattern: "/v1/pools/{id}", SpecPath: "/v1/pools/{id}", Perm: PermPoolRead, handler: s.getPool},
 		{Method: "PUT", Pattern: "/v1/pools/{id}", SpecPath: "/v1/pools/{id}", Perm: PermPoolWrite, Mutating: true, handler: s.updatePool},
+		{Method: "DELETE", Pattern: "/v1/pools/{id}", SpecPath: "/v1/pools/{id}", Perm: PermPoolWrite, Mutating: true, handler: s.deletePool},
 		{Method: "POST", Pattern: "/v1/pools/{idverb}", Verb: "reconcile", SpecPath: "/v1/pools/{id}:reconcile", Perm: PermPoolWrite, Mutating: true, handler: s.reconcilePool},
+		{Method: "POST", Pattern: "/v1/pools/{idverb}", Verb: "pause", SpecPath: "/v1/pools/{id}:pause", Perm: PermPoolWrite, Mutating: true, handler: s.pausePool},
+		{Method: "POST", Pattern: "/v1/pools/{idverb}", Verb: "resume", SpecPath: "/v1/pools/{id}:resume", Perm: PermPoolWrite, Mutating: true, handler: s.resumePool},
 
 		{Method: "POST", Pattern: "/v1/classes", SpecPath: "/v1/classes", Perm: PermClassWrite, Mutating: true, handler: s.createClass},
 		{Method: "GET", Pattern: "/v1/classes", SpecPath: "/v1/classes", Perm: PermClassRead, handler: s.listClasses},

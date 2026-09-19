@@ -154,14 +154,49 @@ func (s *Service) GetAcquisition(ctx context.Context, id string) (*storage.Acqui
 	if err != nil {
 		return nil, err
 	}
-	// Bound acquisitions reach their resource via the lease; surface it on
-	// the (otherwise cleared) pending field so the envelope carries it.
+	s.fillResourceID(ctx, acq)
+	return acq, nil
+}
+
+// fillResourceID surfaces a bound acquisition's resource on the (otherwise
+// cleared) pending field so the envelope carries it: Bind nulls
+// pending_resource_id and the resource is reachable only via the lease.
+func (s *Service) fillResourceID(ctx context.Context, acq *storage.Acquisition) {
 	if acq.State == storage.AcqBound && acq.LeaseID != nil && acq.PendingResourceID == nil {
 		if lease, err := s.st.Leases().Get(ctx, *acq.LeaseID); err == nil {
 			acq.PendingResourceID = &lease.ResourceID
 		}
 	}
-	return acq, nil
+}
+
+// LiveAcqStates are the non-terminal acquisition states — what an operator
+// means by "what is in flight right now".
+var LiveAcqStates = []storage.AcqState{storage.AcqPending, storage.AcqProvisioning, storage.AcqBound}
+
+// ListAcquisitions lists acquisitions in the given states, defaulting to the
+// live ones. The default is not cosmetic: acquisitions are never garbage
+// collected, so an unfiltered listing is the full history of the control
+// plane and grows without bound. Pass resource to narrow to one machine.
+func (s *Service) ListAcquisitions(ctx context.Context, states []storage.AcqState, resource string) ([]*storage.Acquisition, error) {
+	if len(states) == 0 {
+		states = LiveAcqStates
+	}
+	acqs, err := s.st.Acquisitions().ListByState(ctx, states...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*storage.Acquisition, 0, len(acqs))
+	for _, a := range acqs {
+		s.fillResourceID(ctx, a)
+		// ponytail: in-memory resource filter — ListByState selects on
+		// state only, and the resource is a lease hop away. Push it into
+		// SQL if acquisition volume ever makes the scan hurt.
+		if resource != "" && (a.PendingResourceID == nil || string(*a.PendingResourceID) != resource) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // Release ends an acquisition (DELETE /v1/acquisitions/{id}). Releasing an

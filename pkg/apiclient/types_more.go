@@ -62,6 +62,12 @@ type Pool struct {
 	Paused     bool            `json:"paused,omitempty"`
 }
 
+type AcquisitionList struct {
+	APIVersion string        `json:"apiVersion"`
+	Kind       string        `json:"kind"` // "AcquisitionList"
+	Items      []Acquisition `json:"items"`
+}
+
 type PoolList struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`

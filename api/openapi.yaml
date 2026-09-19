@@ -23,6 +23,25 @@ paths:
       responses:
         "201": { description: Acquisition accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Acquisition" } } } }
         default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listAcquisitions
+      summary: List acquisitions (live ones only unless ?state says otherwise)
+      parameters:
+        - name: state
+          in: query
+          # Acquisitions are never garbage collected, so an unfiltered listing
+          # would be the control plane's whole history: the default is the
+          # live states (pending, provisioning, bound).
+          description: "repeatable; default pending+provisioning+bound"
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [pending, provisioning, bound, failed, released, expired] }
+        - { name: resource, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Acquisitions, content: { application/json: { schema: { $ref: "#/components/schemas/AcquisitionList" } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/acquisitions/{id}:
     get:
       operationId: getAcquisition
@@ -57,6 +76,15 @@ paths:
         - { name: kind, in: query, schema: { type: string } }
         - { name: class, in: query, schema: { type: string } }
         - { name: provider, in: query, schema: { type: string } }
+        - { name: pool, in: query, schema: { type: string } }
+        - name: phase
+          in: query
+          description: repeatable
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [unknown, provisioning, ready, allocated, draining, deleting, failed, orphaned, parking, parked, starting] }
       responses:
         "200": { description: Resources, content: { application/json: { schema: { $ref: "#/components/schemas/ResourceList" } } } }
         default: { $ref: "#/components/responses/Error" }
@@ -100,6 +128,30 @@ paths:
       responses:
         "202": { description: Start journaled, content: { application/json: { schema: { type: object } } } }
         "200": { description: Already starting/running, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:undrain:
+    post:
+      operationId: undrainResource
+      summary: Cancel a drain and return the resource to ready (200 — nothing is left in flight; already ready is 200, not 409)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Ready, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:protect:
+    post:
+      operationId: protectResource
+      summary: Set metadata.protected — refuses deletion, parking, idle reclaim and exclusive scheduling (200; already protected is 200)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Protected, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/resources/{id}:unprotect:
+    post:
+      operationId: unprotectResource
+      summary: Clear metadata.protected (200; already unprotected is 200)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Unprotected, content: { application/json: { schema: { type: object } } } }
         default: { $ref: "#/components/responses/Error" }
   /v1/classes:
     post:
@@ -184,13 +236,36 @@ paths:
       responses:
         "200": { description: Pool, content: { application/json: { schema: { $ref: "#/components/schemas/Pool" } } } }
         default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deletePool
+      summary: Delete a pool (409 while spec.replicas > 0 or any member resource still exists — scale to 0 and let the members drain first)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/pools/{id}:reconcile:
     post:
       operationId: reconcilePool
-      summary: Trigger reconciliation (04 §3)
+      summary: Trigger reconciliation (04 §3; 409 while the pool is paused)
       parameters: [{ $ref: "#/components/parameters/id" }]
       responses:
         "202": { description: Reconciling }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/pools/{id}:pause:
+    post:
+      operationId: pausePool
+      summary: Stop reconciling a pool (200 — nothing is left in flight; already paused is 200)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Paused, content: { application/json: { schema: { type: object } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/pools/{id}:resume:
+    post:
+      operationId: resumePool
+      summary: Resume reconciling a pool and kick a reconcile (200; already running is 200)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      responses:
+        "200": { description: Running, content: { application/json: { schema: { type: object } } } }
         default: { $ref: "#/components/responses/Error" }
   /v1/operations:
     get:
@@ -232,6 +307,7 @@ paths:
         - { name: after, in: query, schema: { type: string } }
         - { name: since, in: query, schema: { type: string, example: "1h" } }
         - { name: limit, in: query, schema: { type: integer } }
+        - { name: resource, in: query, schema: { type: string } }
       responses:
         "200": { description: Events }
         default: { $ref: "#/components/responses/Error" }
@@ -365,6 +441,12 @@ components:
         queueDeadline: { type: string, format: date-time, description: "createdAt + maxWait; after this the acquisition scales up" }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    AcquisitionList:
+      type: object
+      properties:
+        apiVersion: { type: string }
+        kind: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/Acquisition" } }
     ClassManifest:
       type: object
       required: [spec]
@@ -426,7 +508,10 @@ components:
         kind: { type: string }
         metadata: { $ref: "#/components/schemas/Metadata" }
         spec: { type: object }
-        paused: { type: boolean }
+        # Not part of PoolManifest: 'paused' has no "unset", so honouring it on
+        # apply would let a manifest that omits the field silently resume a
+        # paused pool.
+        paused: { type: boolean, readOnly: true, description: "set via :pause / :resume; ignored on apply" }
     PoolList:
       type: object
       properties:

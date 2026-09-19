@@ -20,9 +20,9 @@ These persistent flags apply to every client command:
 | `--token` | `$FLEETPLANE_TOKEN` | API token (`flp_<id>.<secret>`, see [ADR-008](../adr/ADR-008-tokens.md)) |
 | `-o`, `--output` | `table` | Output format: `table` or `json` |
 
-`-o json` affects the list-style commands (`resources`, `pools`, `operations`, `events`,
-`providers`) and `acquire`. The single-object commands (`resources get`, `pools get`,
-`operations ID`) always print JSON.
+`-o json` affects the list-style commands (`resources`, `acquisitions`, `pools`,
+`operations`, `events`, `providers`) and `acquire`. The single-object commands
+(`resources get`, `pools get`, `operations ID`) always print JSON.
 
 ### Environment variables
 
@@ -115,6 +115,25 @@ ID                              KIND             PROVIDER      PHASE      EXTERN
 res_01J8FYK2N9V1X4T7Q0C3E6H9SD  compute.machine  hetzner-main  ready      63201175  ci-large-1
 res_01J8FYK7X2T4V9N1Q5C8E3H6SD  compute.machine  hetzner-main  allocated  63201312  ci-large-2
 ```
+
+Filters narrow the listing server-side and combine:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--kind` | — | Only this resource kind |
+| `--class` | — | Only resources of this class |
+| `--provider` | — | Only this provider instance |
+| `--pool` | — | Only members of this pool ID |
+| `--phase` | — | Only these phases, repeatable |
+
+```bash
+fleetplane resources --pool pool_01J8FYKN9Q2T5V8X1C4E7H0KSD --phase ready --phase allocated
+```
+
+`--pool` is the honest membership question: a pool's members are whatever the
+reconciler created for it, which is not the same set as "every resource of the
+pool's class". An unknown `--phase` is rejected by the server with 400 (exit
+code 1).
 
 ### fleetplane resources get
 
@@ -244,6 +263,26 @@ fleetplane resources drain res_01J8FYK2N9V1X4T7Q0C3E6H9SD
 res_01J8FYK2N9V1X4T7Q0C3E6H9SD: draining
 ```
 
+### fleetplane resources undrain
+
+Put a draining resource back into service — the undo for a drain that was a
+mistake. It is the same transition the reconciler makes on its own when a
+deficit reappears, so the machine's readiness clock restarts and idle reclaim
+measures from the return to service rather than from before the drain.
+
+```bash
+fleetplane resources undrain res_01J8FYK2N9V1X4T7Q0C3E6H9SD
+```
+
+```text
+res_01J8FYK2N9V1X4T7Q0C3E6H9SD: ready
+```
+
+A resource that is already `ready` is a no-op success; any other phase is a
+409 (exit code 5). If the pool is still over target the reconciler will simply
+drain it again — undrain rescues the machine, it does not override the
+declared replica count.
+
 ### fleetplane resources park
 
 Stop a ready machine into the near-free parked tier
@@ -278,6 +317,27 @@ fleetplane resources start res_01J8FYK2N9V1X4T7Q0C3E6H9SD
 res_01J8FYK2N9V1X4T7Q0C3E6H9SD: starting
 ```
 
+### fleetplane resources protect / unprotect
+
+Guard a resource against deletion, parking, exclusive scheduling, and idle
+reclaim. Protection is a standing flag, not a one-shot — every one of those
+four gates refuses a protected resource until it is explicitly unprotected. It
+shows up as `metadata.protected` on the resource envelope.
+
+```bash
+fleetplane resources protect res_01J8FYK2N9V1X4T7Q0C3E6H9SD
+fleetplane resources unprotect res_01J8FYK2N9V1X4T7Q0C3E6H9SD
+```
+
+```text
+res_01J8FYK2N9V1X4T7Q0C3E6H9SD: protected
+res_01J8FYK2N9V1X4T7Q0C3E6H9SD: unprotected
+```
+
+Repeating either is a no-op success. An operator's explicit `fleetplane
+resources park` still bypasses the flag ([API guide](api.md)) — protection
+guards deletion, and parking is reversible.
+
 ## fleetplane acquire
 
 Acquire capacity: reuse an existing machine that satisfies the constraints, or create a
@@ -309,6 +369,35 @@ state: bound
 When a new machine has to be provisioned first, the state is `pending` (resource
 column `-`) or `provisioning` (already showing the ID of the machine being created
 for you) — use `fleetplane watch` to wait for `bound`.
+
+## fleetplane acquisitions
+
+List acquisitions and the machines they hold — "who is holding what right now".
+
+| Flag | Default | Description |
+|---|---|---|
+| `--state` | — | Only these states, repeatable |
+| `--resource` | — | Only acquisitions holding this `res_…` ID |
+| `--all` | `false` | Include the terminal states (`failed`, `released`, `expired`) |
+
+```bash
+fleetplane acquisitions
+```
+
+```text
+ID                              STATE  CLASS     RESOURCE                        LEASE                              ACTOR  AGE
+acq_01J8FYKF7H2K5N8Q1T4V9X0CED  bound  ci-large  res_01J8FYK2N9V1X4T7Q0C3E6H9SD  lease_01J8FYKJ2E5H8K1N4Q7T0V3XCSD  ci     12m4s
+```
+
+With no flags the listing covers the live states only — `pending`,
+`provisioning`, `bound`. Acquisitions are never garbage collected, so an
+unfiltered listing would be the control plane's entire history; `--all` (or an
+explicit `--state`) is how you ask for it.
+
+```bash
+fleetplane acquisitions --resource res_01J8FYK2N9V1X4T7Q0C3E6H9SD   # who holds this machine
+fleetplane acquisitions --state failed --state expired              # what did not get capacity
+```
 
 ## fleetplane release
 
@@ -414,9 +503,11 @@ fleetplane pools
 ```
 
 ```text
-ID                               NAME     SPEC
-pool_01J8FYKN9Q2T5V8X1C4E7H0KSD  ci-warm  {"class":"ci-large","replicas":3}
+ID                               NAME     STATUS   SPEC
+pool_01J8FYKN9Q2T5V8X1C4E7H0KSD  ci-warm  running  {"class":"ci-large","replicas":3}
 ```
+
+`STATUS` is `running` or `paused` — see `pools pause` below.
 
 ### fleetplane pools apply
 
@@ -460,6 +551,48 @@ fleetplane pools reconcile pool_01J8FYKN9Q2T5V8X1C4E7H0KSD
 ```text
 pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: reconciling
 ```
+
+A paused pool refuses the kick with a 409 (exit code 5); resume it first.
+
+### fleetplane pools pause / resume
+
+Freeze convergence for one pool: while it is paused the reconciler makes no
+creates, no drains, and no reclaim, so the fleet stays exactly as it stands —
+what you want while investigating. `resume` lifts the freeze and reconciles
+immediately.
+
+```bash
+fleetplane pools pause pool_01J8FYKN9Q2T5V8X1C4E7H0KSD
+fleetplane pools resume pool_01J8FYKN9Q2T5V8X1C4E7H0KSD
+```
+
+```text
+pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: paused
+pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: running
+```
+
+Pausing is a verb, not a spec field: `fleetplane apply` never changes it, so a
+manifest that says nothing about pausing cannot silently resume a pool you
+paused ([ADR-API-002](../adr/ADR-API-002-operation-completeness.md)).
+
+### fleetplane pools delete
+
+Remove a pool. Unlike a resource, a pool is deleted outright rather than
+tombstoned — names are unique and meant to be reused. Two preconditions, each
+a 409 (exit code 5): `spec.replicas` must be `0`, and no member resource may
+still exist.
+
+```bash
+fleetplane pools apply -f pool-scaled-to-zero.json   # replicas: 0
+fleetplane pools delete pool_01J8FYKN9Q2T5V8X1C4E7H0KSD
+```
+
+```text
+pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: deleted
+```
+
+Scale to `0` and let the members drain first; the pool's events stay in the
+audit trail after it is gone.
 
 ## fleetplane classes
 
@@ -545,6 +678,7 @@ List audit events in chronological order (ULID IDs sort by time).
 |---|---|---|
 | `--since` | — | Look-back window, e.g. `1h` |
 | `--after` | — | Cursor: return events after this `evt_…` ID |
+| `--resource` | — | Only events for this `res_…` ID |
 | `--limit` | `100` | Maximum events to return (the server caps it at 1000) |
 
 ```bash
@@ -558,6 +692,14 @@ evt_01J8FYKZ1E4H7K0N3Q6T9V2XSD  09:14:02  acquisition.bound  bound      res_01J8
 ```
 
 Paginate by passing the last ID of a page as `--after`.
+
+`--resource` filters on the server, so a machine's whole history survives the
+limit — grepping a capped page client-side would silently drop the events that
+did not fit:
+
+```bash
+fleetplane events --resource res_01J8FYKB4C7E1H9N2Q5S8T0VXD --since 24h
+```
 
 ## fleetplane providers
 

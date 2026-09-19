@@ -19,9 +19,10 @@ Conventions that apply to every route:
 - **Request IDs** — every response carries an `X-Request-Id` header. Send your own and it is echoed back; otherwise the server generates one (`req_` + 16 hex characters). Error bodies repeat it as `requestId`.
 - **Body limit** — request bodies on the create and update endpoints (resources, acquisitions, pools) are capped at 1 MiB.
 - **Strict decoding** — unknown JSON fields are rejected (HTTP 400) on `POST /v1/resources` and `POST /v1/acquisitions`.
-- **Colon verbs** — actions that are not plain CRUD are spelled as `POST /v1/<collection>/{id}:<verb>` (`:drain`, `:park`, `:start`, `:reconcile`, `:resolve`). The path is split at the *last* colon; IDs never contain one ([ADR-005](../adr/ADR-005-http-router.md)). An unknown verb returns 404 `not_found`.
+- **Colon verbs** — actions that are not plain CRUD are spelled as `POST /v1/<collection>/{id}:<verb>` (`:drain`, `:undrain`, `:park`, `:start`, `:protect`, `:unprotect`, `:reconcile`, `:pause`, `:resume`, `:resolve`). The path is split at the *last* colon; IDs never contain one ([ADR-005](../adr/ADR-005-http-router.md)). An unknown verb returns 404 `not_found`.
 - **IDs** — every entity ID is a prefixed ULID: `res_`, `pool_`, `acq_`, `lease_`, `op_`, `evt_` ([ADR-004](../adr/ADR-004-ids.md)).
 - **Async accept** — mutations that touch a provider (create, delete) return `201`/`202` as soon as the intent is durably journaled. The operation engine converges in the background; poll the resource, acquisition, or operation to observe progress.
+- **Synchronous accept** — mutations that only move control-plane state (`:undrain`, `:protect`, `:unprotect`, `:pause`, `:resume`, and the pool delete) return `200`. Nothing is left in flight when the call returns, so there is nothing to poll.
 
 ## Authentication
 
@@ -55,9 +56,9 @@ Each route requires exactly one permission (see the route table below). The clos
 | `resource.read` | Read resources and acquisitions |
 | `resource.acquire` | Acquire and release capacity |
 | `resource.create` | Create resources directly |
-| `resource.delete` | Delete and drain resources |
+| `resource.delete` | Delete, drain, undrain, and protect resources |
 | `pool.read` | Read pools |
-| `pool.write` | Create, update, reconcile pools |
+| `pool.write` | Create, update, pause, reconcile, and delete pools |
 | `class.read` | Read classes |
 | `class.write` | Create, update, delete classes |
 | `provider.read` | Read provider health |
@@ -72,6 +73,7 @@ The server is driven by a single route table that also drives per-route authoriz
 | Method | Path | Permission | Mutating |
 |---|---|---|---|
 | POST | `/v1/acquisitions` | `resource.acquire` | yes |
+| GET | `/v1/acquisitions` | `resource.read` | no |
 | GET | `/v1/acquisitions/{id}` | `resource.read` | no |
 | DELETE | `/v1/acquisitions/{id}` (release) | `resource.acquire` | yes |
 | POST | `/v1/resources` | `resource.create` | yes |
@@ -81,6 +83,9 @@ The server is driven by a single route table that also drives per-route authoriz
 | POST | `/v1/resources/{id}:drain` | `resource.delete` | yes |
 | POST | `/v1/resources/{id}:park` | `resource.delete` | yes |
 | POST | `/v1/resources/{id}:start` | `resource.create` | yes |
+| POST | `/v1/resources/{id}:undrain` | `resource.delete` | yes |
+| POST | `/v1/resources/{id}:protect` | `resource.delete` | yes |
+| POST | `/v1/resources/{id}:unprotect` | `resource.delete` | yes |
 | POST | `/v1/classes` | `class.write` | yes |
 | GET | `/v1/classes` | `class.read` | no |
 | GET | `/v1/classes/{name}` | `class.read` | no |
@@ -90,14 +95,17 @@ The server is driven by a single route table that also drives per-route authoriz
 | GET | `/v1/pools` | `pool.read` | no |
 | GET | `/v1/pools/{id}` | `pool.read` | no |
 | PUT | `/v1/pools/{id}` | `pool.write` | yes |
+| DELETE | `/v1/pools/{id}` | `pool.write` | yes |
 | POST | `/v1/pools/{id}:reconcile` | `pool.write` | yes |
+| POST | `/v1/pools/{id}:pause` | `pool.write` | yes |
+| POST | `/v1/pools/{id}:resume` | `pool.write` | yes |
 | GET | `/v1/operations` | `operation.read` | no |
 | GET | `/v1/operations/{id}` | `operation.read` | no |
 | POST | `/v1/operations/{id}:resolve` | `provider.admin` | yes |
 | GET | `/v1/events` | `operation.read` | no |
 | GET | `/v1/providers` | `provider.read` | no |
 
-The read endpoints beyond the original design (acquisition get, pool reads, operation list, providers, `:resolve`) are documented in [ADR-API-001](../adr/ADR-API-001-read-endpoints.md).
+The read endpoints beyond the original design (acquisition get, pool reads, operation list, providers, `:resolve`) are documented in [ADR-API-001](../adr/ADR-API-001-read-endpoints.md). The acquisition list, the pool lifecycle verbs, and the resource verbs that close the write-side gaps are documented in [ADR-API-002](../adr/ADR-API-002-operation-completeness.md).
 
 ### Classes
 
@@ -152,6 +160,73 @@ resource until its phase lands `parked` (or back at `ready` after a
 `:start` — a failed stop reverts `parking → ready`, a failed start reverts
 `starting → parked`).
 
+### Undrain, protect, unprotect
+
+Three resource verbs move control-plane state only — no provider call stands
+behind them — so they answer `200` rather than the `202` of the journaled
+verbs above:
+
+| Verb | Effect | Body |
+|---|---|---|
+| `POST /v1/resources/{id}:undrain` | `draining` → `ready`: the manual inverse of `:drain` | `{"id": "res_…", "status": "ready"}` |
+| `POST /v1/resources/{id}:protect` | Sets `metadata.protected` | `{"id": "res_…", "status": "protected"}` |
+| `POST /v1/resources/{id}:unprotect` | Clears it | `{"id": "res_…", "status": "unprotected"}` |
+
+All three take `resource.delete`. Asking for a state the resource is already
+in is `200`, never a conflict — protecting a protected resource, or
+undraining one that is already `ready`, is success. `:undrain` from any other
+phase is 409 `conflict`; all three are `404` on a tombstoned resource.
+
+Protection is the flag the deletion, parking, exclusive-scheduling and
+idle-reclaim gates already read: a protected resource refuses all four until
+it is explicitly unprotected. It is metadata rather than desired state, so
+setting it does not bump `metadata.generation`.
+
+`:undrain` performs the same transition the reconciler makes automatically when
+a deficit reappears ([design doc 05 §6](../05_RECONCILIATION_AND_SCHEDULING.md)),
+so readiness is restamped
+identically and idle reclaim measures from the return to service. Racing the
+reconciler is safe: the phase change is a compare-and-swap, so one side wins
+and the other sees `409`.
+
+### Pause, resume, and delete a pool
+
+`POST /v1/pools/{id}:pause` freezes convergence for one pool — no creates, no
+drains, no reclaim — which is what an operator wants while investigating;
+`:resume` lifts the freeze and kicks an immediate reconcile. Both are
+synchronous, both take `pool.write`, and both answer `200` when the pool is
+already in the requested state:
+
+| Verb | Body |
+|---|---|
+| `POST /v1/pools/{id}:pause` | `{"id": "pool_…", "status": "paused"}` |
+| `POST /v1/pools/{id}:resume` | `{"id": "pool_…", "status": "running"}` |
+
+The flag is surfaced as the pool envelope's `paused` and is deliberately
+**not** a manifest field: a bool has no "unset", so honouring it in `apply`
+would mean a manifest that omits it silently resumed a paused pool
+([ADR-API-002](../adr/ADR-API-002-operation-completeness.md)). While a pool is
+paused, `:reconcile` returns 409 `conflict` instead of accepting a kick the
+paused reconciler would discard.
+
+`DELETE /v1/pools/{id}` removes a pool. This is a hard delete, not the
+resource tombstone — pool names are unique and operators reuse them. Two
+preconditions, both re-checked inside the deleting transaction, both 409
+`conflict`:
+
+- `spec.replicas` must be `0`. A pool that still wants replicas is one the
+  reconciler is actively creating into, and the in-flight resource would land
+  on a pool row that no longer exists.
+- No member resource may still exist. Scale to `0` and let the members drain
+  first.
+
+```json
+{ "id": "pool_01J5X0C8T2VBKQ4WYNRD6HZMGS", "status": "deleted" }
+```
+
+The row is gone, so a second `DELETE` is `404`; the pool's events stay in the
+audit trail.
+
 ## Envelopes
 
 The wire shapes live in `pkg/apiclient` — the server serializes exactly those Go types, so the package doubles as the reference Go client.
@@ -191,7 +266,7 @@ The wire shapes live in `pkg/apiclient` — the server serializes exactly those 
 Notes:
 
 - On create (`POST /v1/resources`), `spec.class` is optional. With a class, `spec.kind` and `spec.provider` are inherited (a different value is a `400`) and `spec.machine` is a **shallow overlay** on the class spec — a top-level key you send (`image`, `userData`, `labels`, …) replaces the class's value wholesale. Without a class, `kind`, `provider` and a full `machine` spec are required.
-- `metadata.ownership` is `managed`, `adopted`, or `observed`; `metadata.protected` marks delete-protected resources.
+- `metadata.ownership` is `managed`, `adopted`, or `observed`; `metadata.protected` marks delete-protected resources (set and cleared by `:protect` / `:unprotect`).
 - `status.phase` is one of `unknown`, `provisioning`, `ready`, `allocated`, `parking`, `parked`, `starting`, `draining`, `deleting`, `failed`, `orphaned`. There is no `deleted` phase — deletion terminality is the storage tombstone, surfaced as `metadata.deletedAt` ([ADR-017](../adr/ADR-017-operation-states.md)).
 - `status.parkedAt` (RFC 3339) appears while the machine is in the parked tier — when it entered `parked` ([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)); it clears on the return to `ready`.
 - `status.extensions` is the provider's native object, passed through without translation.
@@ -229,7 +304,7 @@ An acquisition with a queue budget ([cost-aware leasing](concepts.md#cost-aware-
 }
 ```
 
-The pool `spec` must name either a configured `class`, or an inline template of `kind` + `provider` + `machine`. `replicas` must be >= 0. A top-level `"paused": true` field appears when the pool is paused (it is omitted otherwise).
+The pool `spec` must name either a configured `class`, or an inline template of `kind` + `provider` + `machine`. `replicas` must be >= 0. A top-level `"paused": true` field appears when the pool is paused (it is omitted otherwise); `:pause` and `:resume` set it, never the manifest.
 
 ### Operation
 
@@ -270,7 +345,7 @@ List endpoints wrap items in a list envelope:
 { "apiVersion": "fleetplane.io/v1alpha1", "kind": "ResourceList", "items": [] }
 ```
 
-The kinds are `ResourceList`, `PoolList`, `OperationList`, `EventList`, and `ProviderList`. Provider items look like:
+The kinds are `ResourceList`, `AcquisitionList`, `PoolList`, `OperationList`, `EventList`, and `ProviderList`. Provider items look like:
 
 ```json
 { "instance": "hetzner-main", "driver": "hetzner", "state": "healthy", "since": "2026-08-15T11:00:00Z", "lastCheck": "2026-08-15T12:07:00Z", "consecutiveFailures": 0 }
@@ -333,6 +408,33 @@ Semantics:
 | `kind` | Resource kind, e.g. `compute.machine` |
 | `class` | Class name |
 | `provider` | Provider instance name |
+| `pool` | Pool ID — the pool's member resources |
+| `phase` | Resource phase; repeatable, and any of them matches. An unknown phase is 400 `invalid` |
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/resources?pool=pool_01J5X0C8T2VBKQ4WYNRD6HZMGS&phase=ready&phase=allocated"
+```
+
+**`GET /v1/acquisitions`** — who is holding what right now:
+
+| Param | Meaning |
+|---|---|
+| `state` | Acquisition state; repeatable, and any of them matches. An unknown state is 400 `invalid` |
+| `resource` | Only acquisitions holding this `res_` ID |
+
+Without `state` the listing covers the **live** states only — `pending`,
+`provisioning`, `bound`. That default is not cosmetic: acquisitions are never
+garbage collected, so an unfiltered listing would be the control plane's
+entire history and would grow without bound. Ask for terminal states
+explicitly:
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/acquisitions?state=failed&state=released&state=expired"
+```
+
+Items come back in an `AcquisitionList` envelope.
 
 **`GET /v1/events`** — the audit trail; combine a cursor or lookback with a limit:
 
@@ -340,12 +442,17 @@ Semantics:
 |---|---|
 | `after` | Return events after this `evt_` ID (cursor) |
 | `since` | Go duration lookback, e.g. `1h`, `30m` |
+| `resource` | Only events for this `res_` ID |
 | `limit` | Max items; default 100, capped at 1000 |
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" \
   "$BASE/v1/events?since=1h&limit=200"
 ```
+
+`resource` filters server-side, which is what makes a per-machine history
+reliable: filtering a capped page client-side silently drops the events that
+did not fit in `limit`.
 
 **`DELETE /v1/resources/{id}?dryRun=true`** — runs every deletion gate (managed ownership, not protected, no active leases) and reports the plan without mutating anything:
 
@@ -480,6 +587,8 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
 { "id": "pool_01J5X0C8T2VBKQ4WYNRD6HZMGS", "status": "reconciling" }
 ```
 
+A paused pool refuses the kick with `409` `conflict` — resume it first.
+
 ### Resolve an uncertain operation
 
 When a provider call's outcome cannot be determined and the verification window is exhausted, the operation freezes in state `uncertain` and waits for an operator (the `fleetplane_operations{state="uncertain"}` metric counts these). Find it, decide what actually happened at the provider, then resolve:
@@ -544,5 +653,5 @@ Non-2xx responses come back as `*apiclient.APIError` carrying the decoded error 
 - [`api/openapi.yaml`](../../api/openapi.yaml) — the machine-readable contract
 - [API and resource model](../04_API_AND_RESOURCE_MODEL.md) design doc — the model behind the routes
 - [Security and operations](../07_SECURITY_AND_OPERATIONS.md) design doc — permissions, ops listener, readiness philosophy
-- [ADR-008](../adr/ADR-008-tokens.md) — token format · [ADR-005](../adr/ADR-005-http-router.md) — colon verbs · [ADR-011](../adr/ADR-011-openapi.md) — OpenAPI contract testing · [ADR-017](../adr/ADR-017-operation-states.md) — operation states · [ADR-API-001](../adr/ADR-API-001-read-endpoints.md) — additive read endpoints
+- [ADR-008](../adr/ADR-008-tokens.md) — token format · [ADR-005](../adr/ADR-005-http-router.md) — colon verbs · [ADR-011](../adr/ADR-011-openapi.md) — OpenAPI contract testing · [ADR-017](../adr/ADR-017-operation-states.md) — operation states · [ADR-API-001](../adr/ADR-API-001-read-endpoints.md) — additive read endpoints · [ADR-API-002](../adr/ADR-API-002-operation-completeness.md) — completing the operation surface
 - [Dashboard guide](dashboard.md) — the embedded web UI

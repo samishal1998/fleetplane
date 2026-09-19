@@ -104,7 +104,7 @@ providers:
 	for time.Now().Before(deadline) {
 		res, err := c.GetResource(context.Background(), created.Metadata.ID)
 		if err == nil && res.Status.Phase == "ready" && res.Status.ExternalID != "" {
-			list, err := c.ListResources(context.Background())
+			list, err := c.ListResources(context.Background(), apiclient.ResourceFilter{})
 			if err != nil {
 				t.Fatal(err)
 			}

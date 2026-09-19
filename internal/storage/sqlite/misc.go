@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/samishal1998/fleetplane/internal/ids"
@@ -49,6 +50,40 @@ func (ps poolStore) List(ctx context.Context) ([]*storage.Pool, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func (ps poolStore) SetPaused(ctx context.Context, id storage.PoolID, paused bool, atMillis int64) error {
+	return ps.execOne(ctx, `UPDATE pools SET paused=?, updated_at=? WHERE id=?`,
+		boolInt(paused), atMillis, string(id))
+}
+
+func (ps poolStore) Delete(ctx context.Context, id storage.PoolID) error {
+	// Tombstoned resources and terminal operations still carry pool_id, and
+	// FK enforcement counts them, so a pool that ever held a member could
+	// never be deleted. Clearing those dead pointers is safe — the pool is
+	// going away. Live members are deliberately NOT cleared: the FK then
+	// refuses the DELETE below, backstopping the caller's gate. Events keep
+	// the audit trail (events.pool_id has no FK).
+	if _, err := ps.q.ExecContext(ctx,
+		`UPDATE resources SET pool_id=NULL WHERE pool_id=? AND deleted_at IS NOT NULL`, string(id)); err != nil {
+		return mapErr(err)
+	}
+	if _, err := ps.q.ExecContext(ctx,
+		`UPDATE operations SET pool_id=NULL WHERE pool_id=? AND terminal_at IS NOT NULL`, string(id)); err != nil {
+		return mapErr(err)
+	}
+	return ps.execOne(ctx, `DELETE FROM pools WHERE id=?`, string(id))
+}
+
+func (ps poolStore) execOne(ctx context.Context, q string, args ...any) error {
+	res, err := ps.q.ExecContext(ctx, q, args...)
+	if err != nil {
+		return mapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w", storage.ErrNotFound)
+	}
+	return nil
 }
 
 func scanPool(row rowScanner) (*storage.Pool, error) {

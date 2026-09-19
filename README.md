@@ -164,7 +164,7 @@ Deeper background:
 
 ## Project status
 
-Current release: **v0.7.0**. All phases of the [implementation plan](docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, six drivers, pools and reconciliation, acquisition scheduling, cost-aware leasing, parked machines, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
+Current release: **v0.8.0** — the operation surface is now complete: every state the kernel acts on can be set from the API, CLI, and dashboard (pool pause/resume/delete, resource undrain/protect/unprotect, acquisition listing, pool and phase filters). All phases of the [implementation plan](docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, six drivers, pools and reconciliation, acquisition scheduling, cost-aware leasing, parked machines, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
 
 ## Development
 

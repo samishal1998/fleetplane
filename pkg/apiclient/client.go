@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -89,9 +90,33 @@ func (c *Client) GetResource(ctx context.Context, id string) (*Resource, error) 
 	return &res, nil
 }
 
-func (c *Client) ListResources(ctx context.Context) (*ResourceList, error) {
+// ResourceFilter narrows ListResources; the zero value lists the fleet.
+type ResourceFilter struct {
+	Kind     string
+	Class    string
+	Provider string
+	Pool     string
+	Phases   []string
+}
+
+func (f ResourceFilter) query() url.Values {
+	q := url.Values{}
+	for k, v := range map[string]string{
+		"kind": f.Kind, "class": f.Class, "provider": f.Provider, "pool": f.Pool,
+	} {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	for _, p := range f.Phases {
+		q.Add("phase", p)
+	}
+	return q
+}
+
+func (c *Client) ListResources(ctx context.Context, f ResourceFilter) (*ResourceList, error) {
 	var list ResourceList
-	if err := c.do(ctx, http.MethodGet, "/v1/resources", nil, "", &list); err != nil {
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/resources", f.query()), nil, "", &list); err != nil {
 		return nil, err
 	}
 	return &list, nil

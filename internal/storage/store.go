@@ -89,6 +89,11 @@ type ResourceStore interface {
 	SetProviderFacts(ctx context.Context, id ResourceID, extension, capacity json.RawMessage, atMillis int64) error
 	SetLastLeaseEnded(ctx context.Context, id ResourceID, atMillis int64) error
 
+	// SetDeleteProtected toggles the deletion guard. It deliberately does
+	// not go through UpdateSpec: protection is metadata, not desired
+	// state, and must not bump Generation.
+	SetDeleteProtected(ctx context.Context, id ResourceID, protected bool, atMillis int64) error
+
 	// MarkDeleted tombstones (ADR-017). Rows are never hard-deleted.
 	MarkDeleted(ctx context.Context, id ResourceID, atMillis int64) error
 
@@ -112,6 +117,15 @@ type PoolStore interface {
 	Get(ctx context.Context, id PoolID) (*Pool, error)
 	GetByName(ctx context.Context, name string) (*Pool, error)
 	List(ctx context.Context) ([]*Pool, error)
+
+	// SetPaused flips the reconciler's pause flag without touching the
+	// spec (Upsert would bump Generation and churn observedGeneration).
+	SetPaused(ctx context.Context, id PoolID, paused bool, atMillis int64) error
+
+	// Delete removes the pool row. Unlike resources, pools carry no
+	// tombstone: the name is UNIQUE and operators reuse it. Callers must
+	// have already refused live members — FK enforcement is the backstop.
+	Delete(ctx context.Context, id PoolID) error
 }
 
 type AcquisitionStore interface {

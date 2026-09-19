@@ -22,3 +22,4 @@ Deviations from the design docs (`docs/00`–`10`) and decisions the docs leave 
 | [016](ADR-016-property-testing.md) | pgregory.net/rapid (MPL-2.0, test-only) |
 | [017](ADR-017-operation-states.md) | Operation states; tombstone deletion; ghost vs orphan |
 | [API-001](ADR-API-001-read-endpoints.md) | Additive read endpoints beyond 04 §3 |
+| [API-002](ADR-API-002-operation-completeness.md) | Completing the operation surface (pause, protect, pool delete, undrain) |

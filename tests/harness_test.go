@@ -168,6 +168,7 @@ func (h *Harness) open(providers *app.Providers, fakeOpts fake.Options) {
 	}
 	h.Svc = app.NewService(st, providers, h.Engine, h.Clock, log, ownerID)
 	h.Svc.AttachScheduling(h.Sched, h.Leases)
+	h.Svc.AttachReconciler(h.Rec) // boot parity: the pool verbs kick through it
 }
 
 // Acquire submits an acquisition through the service and returns its ID.

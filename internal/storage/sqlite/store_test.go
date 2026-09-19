@@ -560,3 +560,55 @@ func TestCheckpointAndProviderInstanceRoundTrip(t *testing.T) {
 		t.Fatalf("provider instance: %+v %v", p, err)
 	}
 }
+
+// Pools are the one row kind with no tombstone, so deleting one has to get
+// past FK enforcement (foreign_keys is ON): tombstoned resources keep their
+// pool_id, and a pool that ever held a member would otherwise be undeletable
+// forever. Live members must still be refused — the FK is the backstop under
+// the service's own gate.
+func TestPoolDelete_LiveMemberRefusedTombstonedAllowed(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	pool := &storage.Pool{
+		ID: storage.PoolID(ids.New(ids.Pool)), Name: "ci", Kind: "compute.machine",
+		Spec: json.RawMessage(`{"class":"ci","replicas":0}`), Generation: 1,
+		CreatedAt: now(), UpdatedAt: now(),
+	}
+	member := &storage.Resource{
+		ID: storage.ResourceID(ids.New(ids.Resource)), Kind: "compute.machine",
+		Provider: "fake-1", Class: "ci", PoolID: &pool.ID,
+		Ownership: storage.OwnershipManaged, Phase: phase.Ready,
+		Spec:      json.RawMessage(`{"serverType":"cpx31"}`),
+		CreatedAt: now(), UpdatedAt: now(),
+	}
+	if err := st.Tx(ctx, func(tx storage.TxStore) error {
+		if err := tx.Pools().Upsert(ctx, pool); err != nil {
+			return err
+		}
+		return tx.Resources().Create(ctx, member)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := st.Tx(ctx, func(tx storage.TxStore) error { return tx.Pools().Delete(ctx, pool.ID) })
+	if !errors.Is(err, storage.ErrConflict) {
+		t.Fatalf("delete with a live member: %v, want a conflict from the FK", err)
+	}
+
+	if err := st.Tx(ctx, func(tx storage.TxStore) error {
+		return tx.Resources().MarkDeleted(ctx, member.ID, now())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Tx(ctx, func(tx storage.TxStore) error { return tx.Pools().Delete(ctx, pool.ID) }); err != nil {
+		t.Fatalf("delete with only tombstoned members: %v", err)
+	}
+	if _, err := st.Pools().Get(ctx, pool.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("pool still readable after delete: %v", err)
+	}
+	// The tombstone survives the pool; only its dead pointer is cleared.
+	got, err := st.Resources().Get(ctx, member.ID)
+	if err != nil || got.DeletedAt == nil || got.PoolID != nil {
+		t.Fatalf("member tombstone after pool delete: %+v %v", got, err)
+	}
+}

@@ -26,9 +26,13 @@ func poolsCmd(r *root) *cobra.Command {
 				return printJSON(cmd, list)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tSPEC")
+			fmt.Fprintln(w, "ID\tNAME\tSTATUS\tSPEC")
 			for _, p := range list.Items {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", p.Metadata.ID, p.Metadata.Name, compactJSON(p.Spec))
+				status := "running"
+				if p.Paused {
+					status = "paused"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.Metadata.ID, p.Metadata.Name, status, compactJSON(p.Spec))
 			}
 			return w.Flush()
 		},
@@ -81,7 +85,14 @@ func poolsCmd(r *root) *cobra.Command {
 			return printJSON(cmd, pool)
 		},
 	}
-	cmd.AddCommand(apply, reconcile, get)
+	pause := resourceVerb(r, "pause", "Freeze convergence: no creates, drains or reclaim until resumed",
+		"paused", (*apiclient.Client).PausePool)
+	resume := resourceVerb(r, "resume", "Resume convergence and reconcile immediately",
+		"running", (*apiclient.Client).ResumePool)
+	del := resourceVerb(r, "delete", "Delete an empty pool (scale it to 0 and let members drain first)",
+		"deleted", (*apiclient.Client).DeletePool)
+
+	cmd.AddCommand(apply, reconcile, get, pause, resume, del)
 	return cmd
 }
 
@@ -116,13 +127,13 @@ func operationsCmd(r *root) *cobra.Command {
 }
 
 func eventsCmd(r *root) *cobra.Command {
-	var since, after string
+	var since, after, resource string
 	var limit int
 	cmd := &cobra.Command{
 		Use:   "events",
 		Short: "List audit events",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			events, err := r.client().ListEvents(cmd.Context(), after, since, limit)
+			events, err := r.client().ListEvents(cmd.Context(), after, since, resource, limit)
 			if err != nil {
 				return err
 			}
@@ -140,6 +151,7 @@ func eventsCmd(r *root) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&since, "since", "", "look-back window, e.g. 1h")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: return events after this evt_ id")
+	cmd.Flags().StringVar(&resource, "resource", "", "only events for this resource id")
 	cmd.Flags().IntVar(&limit, "limit", 100, "maximum events to return (server cap 1000)")
 	return cmd
 }
