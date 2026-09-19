@@ -5,3 +5,8 @@
 *.db-shm
 cover.out
 /dist/
+
+# docs site (site/)
+/site/node_modules/
+/site/dist/
+/site/.astro/

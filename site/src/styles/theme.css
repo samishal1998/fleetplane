@@ -1,0 +1,72 @@
+/*
+ * Fleetplane identity, carried over from the fleetplane-site landing page
+ * (github.com/samishal1998/fleetplane-site): the hexfleet violet accent
+ * (#7c3aed light / #a78bfa dark), its neutral palette, and the system
+ * font stacks. Only Starlight's own custom properties are set here.
+ */
+
+/* Dark theme (Starlight's default :root). */
+:root {
+	--sl-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+		sans-serif;
+	--sl-font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, 'Liberation Mono',
+		monospace;
+
+	--sl-color-accent-low: #2e1065;
+	--sl-color-accent: #7c3aed;
+	--sl-color-accent-high: #a78bfa;
+
+	--sl-color-white: #ededf2;
+	--sl-color-gray-1: #e2e2e9;
+	--sl-color-gray-2: #cfcfd8;
+	--sl-color-gray-3: #a2a2b0;
+	--sl-color-gray-4: #7c7c8a;
+	--sl-color-gray-5: #32323f;
+	--sl-color-gray-6: #14141d;
+	--sl-color-black: #0c0c11;
+
+	--sl-color-bg-nav: #101018;
+	--sl-color-bg-sidebar: #101018;
+	--sl-color-bg-inline-code: #23232e;
+	--sl-color-hairline-light: #32323f;
+	--sl-color-hairline: #23232e;
+	--sl-color-hairline-shade: #0c0c11;
+}
+
+/* Light theme. */
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ede9fe;
+	--sl-color-accent: #7c3aed;
+	--sl-color-accent-high: #5b21b6;
+
+	--sl-color-white: #17171c;
+	--sl-color-gray-1: #222229;
+	--sl-color-gray-2: #33333c;
+	--sl-color-gray-3: #5b5b66;
+	--sl-color-gray-4: #75757f;
+	--sl-color-gray-5: #d6d6de;
+	--sl-color-gray-6: #e7e7ec;
+	--sl-color-gray-7: #f7f7f9;
+	--sl-color-black: #ffffff;
+
+	--sl-color-bg-nav: #ffffff;
+	--sl-color-bg-sidebar: #f7f7f9;
+	--sl-color-bg-inline-code: #f1eefb;
+	--sl-color-hairline-light: #e7e7ec;
+	--sl-color-hairline: #e7e7ec;
+	--sl-color-hairline-shade: #d6d6de;
+}
+
+/* The landing page's tight headline tracking. */
+.sl-markdown-content :is(h1, h2, h3),
+h1#_top,
+.hero h1 {
+	letter-spacing: -0.02em;
+}
+
+/* Hero lockup: an inline SVG so the trailing hexes follow the text colour. */
+.hero .fp-lockup {
+	width: min(100%, 26rem);
+	height: auto;
+	color: var(--sl-color-white);
+}

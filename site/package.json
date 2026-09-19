@@ -1,0 +1,20 @@
+{
+  "name": "fleetplane-docs",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.2",
+    "astro": "7.3.3",
+    "sharp": "0.35.4",
+    "starlight-links-validator": "0.26.0",
+    "starlight-openapi": "0.26.2"
+  }
+}

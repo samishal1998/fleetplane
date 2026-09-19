@@ -1,14 +1,17 @@
-# CLI reference
+---
+title: "CLI reference"
+description: "Every fleetplane command, flag, environment variable and exit code."
+---
 
 Fleetplane ships as a single binary. `fleetplane serve` runs the control plane; every
 other command is a pure HTTP client of the public API — the CLI never touches the
-database or kernel packages directly ([ADR-006](../adr/ADR-006-cli.md)). Anything the
+database or kernel packages directly ([ADR-006](/fleetplane/developers/adr/adr-006-cli/)). Anything the
 CLI can do, plain HTTP (or [`pkg/apiclient`](https://github.com/samishal1998/fleetplane/tree/main/pkg/apiclient))
 can do too.
 
 The same server also serves a web dashboard at `http://<server.addr>/ui/` (`/` redirects
 there). It is embedded in the binary — no extra deployment. See the
-[dashboard guide](dashboard.md).
+[dashboard guide](/fleetplane/guides/dashboard/).
 
 ## Global flags
 
@@ -17,7 +20,7 @@ These persistent flags apply to every client command:
 | Flag | Default | Description |
 |---|---|---|
 | `--addr` | `$FLEETPLANE_ADDR`, else `http://127.0.0.1:8080` | Fleetplane API address |
-| `--token` | `$FLEETPLANE_TOKEN` | API token (`flp_<id>.<secret>`, see [ADR-008](../adr/ADR-008-tokens.md)) |
+| `--token` | `$FLEETPLANE_TOKEN` | API token (`flp_<id>.<secret>`, see [ADR-008](/fleetplane/developers/adr/adr-008-tokens/)) |
 | `-o`, `--output` | `table` | Output format: `table` or `json` |
 
 `-o json` affects the list-style commands (`resources`, `acquisitions`, `pools`,
@@ -36,7 +39,7 @@ An explicit flag always wins over its environment variable.
 
 ## Exit codes
 
-From [ADR-006](../adr/ADR-006-cli.md):
+From [ADR-006](/fleetplane/developers/adr/adr-006-cli/):
 
 | Code | Meaning |
 |---|---|
@@ -98,9 +101,9 @@ Behavior:
 - Two listeners: the main API on `server.addr` (default `:8080`) and an ops listener on
   `server.opsAddr` (default `127.0.0.1:9090`) for `/metrics`, pprof, and
   `/admin/backup`.
-- The web [dashboard](dashboard.md) is served on the main listener at `/ui/`.
+- The web [dashboard](/fleetplane/guides/dashboard/) is served on the main listener at `/ui/`.
 
-See the [configuration guide](configuration.md) for the full config file reference.
+See the [configuration guide](/fleetplane/guides/configuration/) for the full config file reference.
 
 ## fleetplane resources
 
@@ -247,7 +250,7 @@ res_01J8FYK2N9V1X4T7Q0C3E6H9SD: deleting
 ```
 
 The CLI has no dry-run flag; the API supports a delete preview via
-`DELETE /v1/resources/{id}?dryRun=true`, and the [dashboard](dashboard.md) exposes it
+`DELETE /v1/resources/{id}?dryRun=true`, and the [dashboard](/fleetplane/guides/dashboard/) exposes it
 as a delete preview.
 
 ### fleetplane resources drain
@@ -286,7 +289,7 @@ declared replica count.
 ### fleetplane resources park
 
 Stop a ready machine into the near-free parked tier
-([concepts → parked machines](concepts.md#parked-machines-the-warm-tier)) —
+([concepts → parked machines](/fleetplane/guides/concepts/#parked-machines-the-warm-tier)) —
 `POST /v1/resources/{id}:park`. The stop is journaled and asynchronous —
 follow the `resource.stop` operation with `fleetplane operations`, or poll
 `fleetplane resources` until the phase is `parked`. On a provider that
@@ -335,13 +338,13 @@ res_01J8FYK2N9V1X4T7Q0C3E6H9SD: unprotected
 ```
 
 Repeating either is a no-op success. An operator's explicit `fleetplane
-resources park` still bypasses the flag ([API guide](api.md)) — protection
+resources park` still bypasses the flag ([API guide](/fleetplane/reference/http-api/)) — protection
 guards deletion, and parking is reversible.
 
 ## fleetplane acquire
 
 Acquire capacity: reuse an existing machine that satisfies the constraints, or create a
-new one from `--class` (design docs, [08 §3](../08_HETZNER_RUNNER_USE_CASE.md)).
+new one from `--class` (design docs, [08 §3](https://github.com/samishal1998/fleetplane/blob/main/docs/08_HETZNER_RUNNER_USE_CASE.md)).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -445,7 +448,7 @@ fleetplane acquire --class ci-large -o json | jq -r .id | xargs fleetplane watch
 Apply declarative manifests: multi-document YAML (or JSON) with kinds `Pool` and
 `Resource`. This is the IR-first declarative layer — it compiles onto the same
 imperative API the rest of the CLI uses, never a second orchestration engine
-(design docs, [04 §8](../04_API_AND_RESOURCE_MODEL.md)).
+(design docs, [04 §8](https://github.com/samishal1998/fleetplane/blob/main/docs/04_API_AND_RESOURCE_MODEL.md)).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -573,7 +576,7 @@ pool_01J8FYKN9Q2T5V8X1C4E7H0KSD: running
 
 Pausing is a verb, not a spec field: `fleetplane apply` never changes it, so a
 manifest that says nothing about pausing cannot silently resume a pool you
-paused ([ADR-API-002](../adr/ADR-API-002-operation-completeness.md)).
+paused ([ADR-API-002](/fleetplane/developers/adr/adr-api-002-operation-completeness/)).
 
 ### fleetplane pools delete
 
@@ -610,7 +613,7 @@ burst     compute.machine  gcp-main      api     10m0s    auto  4h0m0s        10
 ```
 
 `PARK` and `DELETE-AFTER` are the two-stage reclaim knobs for
-[parked machines](concepts.md#parked-machines-the-warm-tier); `PARK` shows
+[parked machines](/fleetplane/guides/concepts/#parked-machines-the-warm-tier); `PARK` shows
 `auto` when unset (the default).
 
 ### fleetplane classes create
@@ -664,10 +667,10 @@ op_01J8FYKV2C5E8H1K4N7Q0T3VSD  resource.delete  uncertain  res_01J8FYK7X2T4V9N1Q
 fleetplane operations op_01J8FYKS8E1H4K7N0Q3T6V9XSD
 ```
 
-Operation states are described in [ADR-017](../adr/ADR-017-operation-states.md). An
+Operation states are described in [ADR-017](/fleetplane/developers/adr/adr-017-operation-states/). An
 operation stuck in `uncertain` needs an operator decision; resolve it via the API
 (`POST /v1/operations/{id}:resolve` with `{"action":"retry-verification"}` or
-`{"action":"mark-failed"}`) or from the [dashboard](dashboard.md) — there is no CLI
+`{"action":"mark-failed"}`) or from the [dashboard](/fleetplane/guides/dashboard/) — there is no CLI
 subcommand for it.
 
 ## fleetplane events
@@ -704,7 +707,7 @@ fleetplane events --resource res_01J8FYKB4C7E1H9N2Q5S8T0VXD --since 24h
 ## fleetplane providers
 
 Show provider instance health (design docs,
-[07 §8](../07_SECURITY_AND_OPERATIONS.md)). Provider health never affects `/health/ready`.
+[07 §8](https://github.com/samishal1998/fleetplane/blob/main/docs/07_SECURITY_AND_OPERATIONS.md)). Provider health never affects `/health/ready`.
 
 ```bash
 fleetplane providers
@@ -721,7 +724,7 @@ do-backup     digitalocean  degraded  3         Get "https://api.digitalocean.co
 Generate an API token **locally** — no server call, no server state. It prints the
 plaintext secret exactly once, plus a ready-to-paste `auth.tokens` snippet for the
 server config; the config stores only the SHA-256 of the secret
-([ADR-008](../adr/ADR-008-tokens.md)).
+([ADR-008](/fleetplane/developers/adr/adr-008-tokens/)).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -758,7 +761,7 @@ loud boot warning) and the CLI needs no `--token`.
 Render a `#cloud-config` user-data file that bootstraps a Fleetplane control VM:
 installs the pinned release, writes `/etc/fleetplane/config.yaml` (with an API
 token injected) and `/etc/fleetplane/secrets.env`, creates the service user, and
-starts the systemd unit — the [setup guide §4](../../SETUP_GUIDE.md#4-run-under-systemd)
+starts the systemd unit — the [setup guide §4](/fleetplane/guides/installation/#run-under-systemd)
 recipe, generated. Local only; no server call.
 
 | Flag | Default | Description |
@@ -785,7 +788,7 @@ Warnings (stderr, non-fatal): `secret://file/` references (not shipped) and a
 
 Trigger a hot backup (`VACUUM INTO`, safe under WAL) via the **ops listener** — the
 documented exception to "the CLI only speaks the public API"
-([ADR-006](../adr/ADR-006-cli.md)). The destination path is interpreted **on the
+([ADR-006](/fleetplane/developers/adr/adr-006-cli/)). The destination path is interpreted **on the
 server host**, not the machine running the CLI.
 
 | Flag | Default | Description |
@@ -803,4 +806,4 @@ backup written to /var/backups/fleetplane-2026-08-15.db
 
 The HTTP client allows up to 10 minutes — `VACUUM INTO` scales with database size. The
 ops listener binds to loopback by default, so run this on the server host (or through
-an SSH tunnel). See the [backup and restore runbook](../runbooks/backup-restore.md).
+an SSH tunnel). See the [backup and restore runbook](/fleetplane/guides/operations/backup/).

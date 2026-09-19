@@ -1,0 +1,45 @@
+name: docs
+
+# Builds the Starlight documentation site in site/ and deploys it to GitHub
+# Pages (https://samishal1998.github.io/fleetplane/). The OpenAPI reference is
+# generated at build time from api/openapi.yaml, so spec changes redeploy too.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "api/openapi.yaml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs from site/package-lock.json, runs `astro build` (which also
+      # validates every internal link) and uploads dist/ as the Pages artifact.
+      - uses: withastro/action@v6
+        with:
+          path: ./site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
