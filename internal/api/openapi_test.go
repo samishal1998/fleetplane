@@ -1,6 +1,9 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -97,5 +100,48 @@ func TestTokenRoundTripAndRedaction(t *testing.T) {
 
 	if _, err := NewPermSet([]string{"root"}); err == nil {
 		t.Fatal("unknown permission accepted")
+	}
+}
+
+// Every query parameter a handler reads must be declared in the spec. The
+// route diff above cannot see parameters, and an undocumented one is invisible
+// to the generated API reference. Coarse by design — a name declared on any
+// operation satisfies it — so it catches the forgotten param, not a misplaced one.
+func TestOpenAPI_QueryParamsDeclared(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := map[string]bool{}
+	add := func(ps openapi3.Parameters) {
+		for _, p := range ps {
+			if p.Value != nil && p.Value.In == openapi3.ParameterInQuery {
+				declared[p.Value.Name] = true
+			}
+		}
+	}
+	for _, item := range doc.Paths.Map() {
+		add(item.Parameters)
+		for _, op := range item.Operations() {
+			add(op.Parameters)
+		}
+	}
+
+	read := regexp.MustCompile(`(?:Query\(\)|\bq)(?:\.Get\(|\[)"([A-Za-z]+)"`)
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range read.FindAllStringSubmatch(string(src), -1) {
+			if !declared[m[1]] {
+				t.Errorf("%s reads query param %q but api/openapi.yaml declares it nowhere", f, m[1])
+			}
+		}
 	}
 }

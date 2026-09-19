@@ -99,8 +99,14 @@ paths:
     delete:
       operationId: deleteResource
       summary: Delete a resource (refused while leased/protected/unowned)
-      parameters: [{ $ref: "#/components/parameters/id" }]
+      parameters:
+        - { $ref: "#/components/parameters/id" }
+        - name: dryRun
+          in: query
+          description: When true, run every deletion gate and report the outcome without deleting anything.
+          schema: { type: boolean }
       responses:
+        "200": { description: "Dry run: every gate passed; nothing was deleted" }
         "202": { description: Deleting }
         default: { $ref: "#/components/responses/Error" }
   /v1/resources/{id}:drain:
