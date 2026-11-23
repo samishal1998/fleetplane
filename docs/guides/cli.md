@@ -200,7 +200,7 @@ fleetplane resources create --class ci-large --name runner-exp \
 
 # A one-off Hetzner machine with no class at all:
 fleetplane resources create --provider hetzner-main --name bastion \
-  --server-type cx22 --image name:debian-12 --location fsn1 \
+  --server-type cpx22 --image name:debian-12 --location fsn1 \
   --user-data-file ./bastion-init.yaml --idempotency-key create-bastion
 ```
 

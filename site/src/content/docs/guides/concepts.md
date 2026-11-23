@@ -81,7 +81,7 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:ci-runner=v12"
       location: fsn1
     reclaim:

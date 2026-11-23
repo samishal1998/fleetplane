@@ -71,7 +71,7 @@ classes:
     kind: compute.machine
     provider: demo
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:demo=v1"
 ```
 

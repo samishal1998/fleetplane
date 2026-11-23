@@ -82,12 +82,12 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:ci-runner=v12"
       location: fsn1
 ```
 
-`serverType` is any Hetzner server type name (`cpx11` is the smallest x86 type).
+`serverType` is any Hetzner server type name (availability is per location — EU locations sell `cpx12`–`cpx62`, `cx23`–`cx53` and `ccx*3`; the older `cpx11`–`cpx51` are US-only (`ash`, `hil`). `GET /v1/server_types` is authoritative).
 It is resolved against the Hetzner API at create time; an unknown name fails
 immediately with an `invalid` error. Reported capacity comes from the server
 type: `cpu` = cores, `memoryMiB` = memory × 1024.

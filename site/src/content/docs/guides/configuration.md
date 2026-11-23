@@ -438,7 +438,7 @@ Classes are reusable creation templates (see the design docs,
 
 | Field | Type | Required | Behavior |
 |---|---|---|---|
-| `serverType` | string | yes | Provider server type (e.g. `cpx31` on Hetzner, `s-2vcpu-4gb` on DO, `t3.medium` on AWS, `e2-medium` on GCP). |
+| `serverType` | string | yes | Provider server type (e.g. `cpx32` on Hetzner, `s-2vcpu-4gb` on DO, `t3.medium` on AWS, `e2-medium` on GCP). |
 | `image` | string | yes | Image reference; syntax is per-driver (see the driver sections above). |
 | `location` | string | no | Placement; overrides the provider's default `location`/`region`/`zone`. An availability zone on AWS, a zone on GCP. |
 | `userData` | string | no | Cloud-init user data. |
@@ -476,7 +476,7 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx21
+      serverType: cpx22
       image: "name:ubuntu-24.04"
       readiness:
         http:
@@ -522,7 +522,7 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:ci-runner=v12"
     reclaim:
       idleAfter: 5m
@@ -595,7 +595,7 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:ci-runner=v12"
     scheduling:
       queue:
@@ -782,7 +782,7 @@ classes:
     kind: compute.machine
     provider: hetzner-main
     spec:
-      serverType: cpx31
+      serverType: cpx32
       image: "snapshot:ci-runner=v12"   # hetzner: id:<n> | name:<os> | snapshot:<selector>
       location: fsn1
       readiness:                         # engine-run gate after provider success
