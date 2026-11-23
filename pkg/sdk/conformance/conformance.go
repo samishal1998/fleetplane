@@ -34,6 +34,12 @@ type Harness struct {
 	Expensive bool
 	// MaxSteps bounds every polling loop (default 200).
 	MaxSteps int
+	// MissingID is a well-formed ID that refers to nothing, for the
+	// Get(missing) check. Set it when the provider's IDs have a fixed shape
+	// (Hetzner's are integers): the default string would be refused as
+	// malformed before reaching the API, so the provider's real 404 handling
+	// would go untested. Default: "does-not-exist-<uid>".
+	MissingID string
 }
 
 // Run executes the conformance catalog.
@@ -170,7 +176,11 @@ func (c *checker) descriptorDeclaresKind(t *testing.T) {
 }
 
 func (c *checker) getMissingIsNotFound(t *testing.T) {
-	_, err := c.driver.Get(context.Background(), provider.ExternalRef{ID: "does-not-exist-" + c.uid()})
+	id := c.h.MissingID
+	if id == "" {
+		id = "does-not-exist-" + c.uid()
+	}
+	_, err := c.driver.Get(context.Background(), provider.ExternalRef{ID: id})
 	if !provider.IsClass(err, provider.ErrNotFound) {
 		t.Fatalf("Get(missing) = %v, want *Error{Class: ErrNotFound} — never (zero, nil)", err)
 	}
