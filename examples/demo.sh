@@ -66,7 +66,7 @@ classes:
   ci-large:
     kind: compute.machine
     provider: demo
-    spec: { serverType: cpx31, image: "snapshot:ci-runner=v12" }
+    spec: { serverType: cpx32, image: "snapshot:ci-runner=v12" }
     reclaim: { idleAfter: 3s }
 EOF
 fi

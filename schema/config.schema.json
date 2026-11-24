@@ -704,10 +704,10 @@
       "properties": {
         "serverType": {
           "title": "Server type",
-          "description": "REQUIRED. Provider server type (e.g. cpx31 on Hetzner, s-2vcpu-4gb on DigitalOcean, t3.small on AWS, e2-medium on GCP).",
+          "description": "REQUIRED. Provider server type (e.g. cpx32 on Hetzner, s-2vcpu-4gb on DigitalOcean, t3.small on AWS, e2-medium on GCP).",
           "type": "string",
           "minLength": 1,
-          "examples": ["cpx31", "s-2vcpu-4gb", "t3.small", "e2-medium"]
+          "examples": ["cpx32", "s-2vcpu-4gb", "t3.small", "e2-medium"]
         },
         "image": {
           "title": "Image reference",

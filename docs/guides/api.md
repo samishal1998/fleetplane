@@ -125,7 +125,7 @@ manifest shape:
   "spec": {
     "kind": "compute.machine",
     "provider": "hetzner-main",
-    "template": { "serverType": "cpx31", "image": "snapshot:ci-runner=v12" },
+    "template": { "serverType": "cpx32", "image": "snapshot:ci-runner=v12" },
     "reclaim": { "idleAfter": "5m" },
     "scheduling": { "queue": { "maxWait": "10m" } }
   }
@@ -251,7 +251,7 @@ The wire shapes live in `pkg/apiclient` — the server serializes exactly those 
     "kind": "compute.machine",
     "provider": "hetzner-main",
     "class": "ci-large",
-    "machine": { "serverType": "cpx31", "image": "name:ubuntu-24.04" }
+    "machine": { "serverType": "cpx32", "image": "name:ubuntu-24.04" }
   },
   "status": {
     "phase": "ready",
@@ -504,7 +504,7 @@ curl -sS -X POST "$BASE/v1/resources" \
     "spec": {
       "kind": "compute.machine",
       "provider": "hetzner-main",
-      "machine": { "serverType": "cpx31", "image": "name:ubuntu-24.04", "location": "fsn1" }
+      "machine": { "serverType": "cpx32", "image": "name:ubuntu-24.04", "location": "fsn1" }
     }
   }'
 ```

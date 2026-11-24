@@ -42,7 +42,7 @@ classes:
     provider: hetzner-prod
     spec:
       image: github-runner-v7
-      serverType: cpx31
+      serverType: cpx32
       location: fsn1
 ```
 
