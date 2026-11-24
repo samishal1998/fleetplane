@@ -237,6 +237,14 @@ func freeAddr(t *testing.T) string {
 	return l.Addr().String()
 }
 
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if fpBin != "" {
+		_ = os.RemoveAll(filepath.Dir(fpBin))
+	}
+	os.Exit(code)
+}
+
 func startFP(t *testing.T, tgt *cloudTarget) *fpServer {
 	t.Helper()
 	fpBinOnce.Do(func() {
