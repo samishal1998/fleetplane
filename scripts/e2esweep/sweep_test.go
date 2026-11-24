@@ -126,3 +126,36 @@ func TestSweepGCPDeletesOnlyOldTestLabeled(t *testing.T) {
 		})
 	}
 }
+
+func TestSweepGCPImagesDeletesOnlyTestLabeled(t *testing.T) {
+	old := time.Now().Add(-3 * time.Hour).Format(time.RFC3339)
+	images := []*gce.Image{
+		{Name: "old-test", CreationTimestamp: old, Labels: map[string]string{"fp-test": "1"}},
+		{Name: "old-golden", CreationTimestamp: old, Labels: map[string]string{"role": "golden"}},
+		{Name: "young-test", CreationTimestamp: time.Now().Format(time.RFC3339), Labels: map[string]string{"fp-test": "1"}},
+	}
+	var deleted []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /projects/p/global/images", func(w http.ResponseWriter, r *http.Request) {
+		if f := r.URL.Query().Get("filter"); f != `labels.fp-test = "1"` {
+			t.Errorf("server-side filter = %q, want the test label", f)
+		}
+		writeJSON(w, &gce.ImageList{Items: images}) // filter ignored on purpose
+	})
+	mux.HandleFunc("DELETE /projects/p/global/images/{name}", func(w http.ResponseWriter, r *http.Request) {
+		deleted = append(deleted, r.PathValue("name"))
+		writeJSON(w, &gce.Operation{Name: "op"})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	svc, err := gce.NewService(context.Background(), option.WithEndpoint(ts.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sweepGCPImages(context.Background(), svc, "p", 2*time.Hour) {
+		t.Fatal("sweepGCPImages reported failure")
+	}
+	if !slices.Equal(deleted, []string{"old-test"}) {
+		t.Fatalf("deleted %v, want only old-test", deleted)
+	}
+}

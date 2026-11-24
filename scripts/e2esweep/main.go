@@ -45,6 +45,7 @@ func main() {
 	ok := true
 	if token != "" {
 		ok = sweepHetzner(ctx, token, maxAge) && ok
+		ok = sweepHetznerSnapshots(ctx, token, maxAge) && ok
 	}
 	if useGCP {
 		// The library reads the key file; this command never does.
@@ -56,6 +57,7 @@ func main() {
 			ok = false
 		} else {
 			ok = sweepGCP(ctx, svc, project, maxAge) && ok
+			ok = sweepGCPImages(ctx, svc, project, maxAge) && ok
 		}
 	}
 	if !ok {
@@ -141,5 +143,80 @@ func sweepGCP(ctx context.Context, svc *gce.Service, project string, maxAge time
 		swept++
 	}
 	fmt.Printf("e2esweep: gcp: %d deleted, %d failed, %d total test instances\n", swept, failed, len(instances))
+	return failed == 0
+}
+
+// sweepHetznerSnapshots deletes test-labeled snapshots (the custom-image
+// E2E builds one from a running server). Same label + age rules.
+func sweepHetznerSnapshots(ctx context.Context, token string, maxAge time.Duration) bool {
+	client := hcloud.NewClient(hcloud.WithToken(token))
+	images, err := client.Image.AllWithOpts(ctx, hcloud.ImageListOpts{
+		ListOpts: hcloud.ListOpts{LabelSelector: "fleetplane.io/test=1", PerPage: 50},
+		Type:     []hcloud.ImageType{hcloud.ImageTypeSnapshot},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2esweep: snapshots:", err)
+		return false
+	}
+	swept, failed := 0, 0
+	for _, img := range images {
+		if img.Labels["fleetplane.io/test"] != "1" || img.Type != hcloud.ImageTypeSnapshot {
+			continue
+		}
+		if time.Since(img.Created) < maxAge {
+			fmt.Printf("e2esweep: keeping snapshot %d: younger than %s\n", img.ID, maxAge)
+			continue
+		}
+		if _, err := client.Image.Delete(ctx, img); err != nil {
+			fmt.Fprintf(os.Stderr, "e2esweep: delete snapshot %d: %v\n", img.ID, err)
+			failed++
+			continue
+		}
+		fmt.Printf("e2esweep: deleted snapshot %s (%d)\n", img.Description, img.ID)
+		swept++
+	}
+	fmt.Printf("e2esweep: %d deleted, %d failed, %d total test snapshots\n", swept, failed, len(images))
+	return failed == 0
+}
+
+// sweepGCPImages deletes test-labeled custom images (the "snapshot:"
+// image-selector E2E creates one). Same label + age rules.
+func sweepGCPImages(ctx context.Context, svc *gce.Service, project string, maxAge time.Duration) bool {
+	var images []*gce.Image
+	err := svc.Images.List(project).Filter(fmt.Sprintf("labels.%s = \"1\"", gcpTestKey)).
+		Pages(ctx, func(page *gce.ImageList) error {
+			images = append(images, page.Items...)
+			return nil
+		})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2esweep: gcp images:", err)
+		return false
+	}
+	swept, failed := 0, 0
+	for _, img := range images {
+		if img == nil || img.Labels[gcpTestKey] != "1" {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, img.CreationTimestamp)
+		if err != nil {
+			created = time.Now()
+		}
+		if time.Since(created) < maxAge {
+			fmt.Printf("e2esweep: gcp: keeping image %s: younger than %s\n", img.Name, maxAge)
+			continue
+		}
+		if _, err := svc.Images.Delete(project, img.Name).Context(ctx).Do(); err != nil {
+			var gerr *googleapi.Error
+			if errors.As(err, &gerr) && gerr.Code == http.StatusNotFound {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "e2esweep: gcp: delete image %s: %v\n", img.Name, err)
+			failed++
+			continue
+		}
+		fmt.Printf("e2esweep: gcp: deleted image %s\n", img.Name)
+		swept++
+	}
+	fmt.Printf("e2esweep: gcp: %d deleted, %d failed, %d total test images\n", swept, failed, len(images))
 	return failed == 0
 }
