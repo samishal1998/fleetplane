@@ -56,7 +56,7 @@ The core knows resources, capabilities, desired/actual state, operations, pools,
 
 ## Project status
 
-Current release: **v0.8.0** — the operation surface is now complete: every state the kernel acts on can be set from the API, CLI, and dashboard (pool pause/resume/delete, resource undrain/protect/unprotect, acquisition listing, pool and phase filters). All phases of the [implementation plan](https://github.com/samishal1998/fleetplane/blob/main/docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, six drivers, pools and reconciliation, acquisition scheduling, cost-aware leasing, parked machines, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
+Current release: **v0.8.1** — fixes acquisitions and pools on Hetzner and GCP, which rejected the default machine name. v0.8.0 completed the operation surface: every state the kernel acts on can be set from the API, CLI, and dashboard (pool pause/resume/delete, resource undrain/protect/unprotect, acquisition listing, pool and phase filters). All phases of the [implementation plan](https://github.com/samishal1998/fleetplane/blob/main/docs/09_IMPLEMENTATION_PLAN.md) are complete — generic resource kernel, provider SDK, six drivers, pools and reconciliation, acquisition scheduling, cost-aware leasing, parked machines, CLI/API hardening, production hardening (metrics, backup, chaos tests), and the `storage.volume` kind as the genericity proof. The API version is `fleetplane.io/v1alpha1`; expect additive evolution.
 
 ## Where to go next
 
