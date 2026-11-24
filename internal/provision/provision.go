@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/samishal1998/fleetplane/internal/ids"
 	"github.com/samishal1998/fleetplane/internal/phase"
@@ -61,7 +62,7 @@ func Prepare(ctx context.Context, providers Providers, ownerID string, cs Create
 	opID := storage.OperationID(ids.New(ids.Operation))
 	name := cs.Name
 	if name == "" {
-		name = string(resID)
+		name = DefaultName(resID)
 	}
 
 	labels := provider.IdentityLabels(ownerID, string(resID), string(opID))
@@ -122,4 +123,13 @@ func (p *Prepared) Journal(ctx context.Context, tx storage.TxStore, actor, idemK
 		ResourceID: &p.Resource.ID, OperationID: &p.Op.ID, PoolID: p.Resource.PoolID,
 		Provider: p.Resource.Provider, Intent: p.Resource.Spec, Outcome: "journaled",
 	})
+}
+
+// DefaultName is the cloud-side name of a machine nobody named (acquisition
+// and pool creates): the resource ID as a valid hostname. "res_01ABC…" has
+// an underscore and capitals, which Hetzner (RFC 1123) and GCE
+// ([a-z]([-a-z0-9]*[a-z0-9])?) both reject — every scheduled create failed
+// on real clouds while docker and the fake accepted it.
+func DefaultName(id storage.ResourceID) string {
+	return strings.ToLower(strings.ReplaceAll(string(id), "_", "-"))
 }
